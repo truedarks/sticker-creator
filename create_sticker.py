@@ -143,6 +143,13 @@ def remove_background_rembg(image_path, output_path=None):
     if not REMBG_AVAILABLE:
         raise ImportError("rembg is not installed. Install with: pip install rembg")
     
+    # Normalize and check input file path
+    image_path = os.path.abspath(os.path.normpath(image_path))
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"File not found: {image_path}")
+    if not os.path.isfile(image_path):
+        raise ValueError(f"Path is not a file: {image_path}")
+    
     try:
         with open(image_path, 'rb') as input_file:
             input_data = input_file.read()
@@ -222,6 +229,13 @@ def create_sticker(image_path, output_path, outline_width=20, smooth=True, auto_
     Returns:
         PIL.Image: Created sticker image
     """
+    # Normalize and check input file path
+    image_path = os.path.abspath(os.path.normpath(image_path))
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"File not found: {image_path}")
+    if not os.path.isfile(image_path):
+        raise ValueError(f"Path is not a file: {image_path}")
+    
     # Smart processing: remove background if needed
     processed_image_path = image_path
     temp_file = None
@@ -410,6 +424,17 @@ Examples:
                        help='Use Ollama for image analysis (requires running Ollama)')
     
     args = parser.parse_args()
+    
+    # Check if input file exists
+    if not os.path.exists(args.input):
+        print(f"Error: File not found: {args.input}", file=sys.stderr)
+        print(f"Please check the file path and try again.", file=sys.stderr)
+        sys.exit(1)
+    
+    # Check if input is actually a file
+    if not os.path.isfile(args.input):
+        print(f"Error: Path is not a file: {args.input}", file=sys.stderr)
+        sys.exit(1)
     
     try:
         create_sticker(

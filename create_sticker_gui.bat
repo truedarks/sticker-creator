@@ -14,7 +14,15 @@ if "!INPUT_FILE!"=="" (
     exit /b 1
 )
 
-set "OUTPUT_FILE=!INPUT_FILE:~0,-4!_sticker.png"
+REM Extract directory, filename without extension, and extension
+for %%F in ("!INPUT_FILE!") do (
+    set "DIR_PATH=%%~dpF"
+    set "NAME_NO_EXT=%%~nF"
+    set "EXT=%%~xF"
+)
+
+REM Create output filename
+set "OUTPUT_FILE=!DIR_PATH!!NAME_NO_EXT!_sticker!EXT!"
 
 echo.
 echo Input file: !INPUT_FILE!
