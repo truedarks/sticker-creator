@@ -17,6 +17,8 @@ A Python tool for creating stickers with white outlines from images. Automatical
 
 1. **Create Sticker**: Drag and drop a PNG file onto `create_sticker.bat`
 2. **Remove Background Only**: Drag and drop a PNG file onto `remove_bg.bat`
+3. **Batch Process (Sequential)**: Drag and drop multiple images onto `batch_remove_bg_sequential.bat`
+4. **Batch Process (Parallel)**: Drag and drop multiple images onto `batch_remove_bg_parallel.bat`
 
 That's it! The script will automatically:
 - Detect if background removal is needed
@@ -128,12 +130,50 @@ To use Ollama for image analysis:
 4. **Smoothing** (optional): Applies smoothing for smoother edges
 5. **Output**: Saves final sticker with transparent background
 
+## Batch Processing
+
+For processing multiple images at once:
+
+### Sequential Processing
+- Drag and drop multiple images onto `batch_remove_bg_sequential.bat`
+- Images are processed one after another
+- Safer for systems with limited resources
+- Slower but more stable
+
+### Parallel Processing
+- Drag and drop multiple images onto `batch_remove_bg_parallel.bat`
+- Images are processed simultaneously using multiple CPU cores
+- Uses all CPU cores except one (leaves one free to prevent system freeze)
+- Much faster for large batches
+- Automatically detects CPU core count
+
+**Example:**
+- 16-core CPU → uses 15 workers
+- 8-core CPU → uses 7 workers
+- 4-core CPU → uses 3 workers
+
+### Command Line
+
+```bash
+# Sequential processing
+python batch_remove_bg.py image1.png image2.png image3.png
+
+# Parallel processing
+python batch_remove_bg.py image1.png image2.png image3.png --parallel
+
+# Custom number of workers
+python batch_remove_bg.py *.png --parallel --workers 4
+```
+
 ## Files
 
 - `create_sticker.py` - Main script for creating stickers
 - `remove_bg.py` - Script for background removal only
+- `batch_remove_bg.py` - Batch processing script
 - `create_sticker.bat` - Windows batch file (drag & drop)
 - `remove_bg.bat` - Windows batch file for background removal
+- `batch_remove_bg_sequential.bat` - Batch processing (sequential)
+- `batch_remove_bg_parallel.bat` - Batch processing (parallel)
 - `create_sticker_gui.bat` - GUI version with file picker
 - `requirements.txt` - Python dependencies
 
