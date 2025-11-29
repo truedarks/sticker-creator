@@ -1,193 +1,200 @@
-# Sticker Creator with White Outline
+# Sticker Creator - Batch Image Processing GUI
 
-A Python tool for creating stickers with white outlines from images. Automatically removes background if present and adds a customizable white border.
+A user-friendly Python application for batch processing images: removing backgrounds and creating stickers with white outlines. Features a simple drag-and-drop interface for Windows.
+
+![GUI Preview](https://via.placeholder.com/800x400?text=Sticker+Creator+GUI)
 
 ## Features
 
-- ✅ **Smart Background Removal**: Automatically detects and removes background from images
-- ✅ **White Outline**: Creates a white border that follows the image shape
-- ✅ **Smooth Edges**: Optional smoothing for more polished outlines
-- ✅ **Easy to Use**: Drag and drop interface via .bat files (Windows)
-- ✅ **Transparent Background**: Output images have transparent backgrounds
-- ✅ **Optional Ollama Integration**: Use Ollama LLM for image analysis
+- 🎨 **Smart Background Removal**: Automatically detects and removes backgrounds from images
+- ✨ **Sticker Creation**: Creates stickers with customizable white outlines
+- 🚀 **Batch Processing**: Process multiple images simultaneously using parallel processing
+- 🖱️ **Drag & Drop Interface**: Simple GUI with drag-and-drop support
+- ⚡ **Fast Processing**: Uses all CPU cores for maximum speed
+- 🎯 **Automatic Setup**: Installs required dependencies on first run
 
 ## Quick Start
 
-### Windows (Easiest)
+### Windows (Recommended)
 
-1. **Create Sticker**: Drag and drop a PNG file onto `create_sticker.bat`
-2. **Remove Background Only**: Drag and drop a PNG file onto `remove_bg.bat`
-3. **Batch Process (Sequential)**: Drag and drop multiple images onto `batch_remove_bg_sequential.bat`
-4. **Batch Process (Parallel)**: Drag and drop multiple images onto `batch_remove_bg_parallel.bat`
+1. **Download** the repository
+2. **Double-click** `sticker_gui.bat` (or `sticker_gui.vbs`)
+3. **Drag and drop** images onto the GUI:
+   - **Left panel**: Remove background from images
+   - **Right panel**: Create stickers with white outline
 
-That's it! The script will automatically:
-- Detect if background removal is needed
-- Install required libraries on first run (with your permission)
-- Create the sticker with white outline
+That's it! The application will:
+- Check for required dependencies on first run
+- Offer to install missing libraries automatically
+- Process your images in the background
+
+### Requirements
+
+- **Python 3.8+** (must be in PATH)
+- Windows OS (for .bat/.vbs launchers)
+
+### First Run
+
+On first launch, the application will check for required libraries:
+- `rembg` - for background removal
+- `tkinterdnd2` - for drag-and-drop support
+
+If any are missing, you'll be prompted to install them. The installation is automatic and takes just a few minutes.
+
+## Installation
+
+### Automatic (Recommended)
+
+Just run `sticker_gui.bat` - dependencies will be installed automatically if needed.
 
 ### Manual Installation
 
-1. Install Python 3.8 or higher
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Run the script:
-   ```bash
-   python create_sticker.py input.png output.png
-   ```
+```bash
+# Clone the repository
+git clone https://github.com/truedarks/sticker-creator.git
+cd sticker-creator
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Optional: Install drag-and-drop support
+pip install tkinterdnd2
+
+# Run the GUI
+python sticker_gui.py
+```
 
 ## Usage
 
-### Command Line
+### GUI Mode (Recommended)
+
+1. Launch `sticker_gui.bat`
+2. **Remove Background**: Drag images to the left panel
+3. **Create Stickers**: Drag images to the right panel
+4. Click on panels to browse files if drag-and-drop is not available
+
+### Command Line Mode
+
+#### Background Removal
 
 ```bash
-# Basic usage (20px outline, with smoothing)
-python create_sticker.py input.png output.png
+# Single image
+python batch_remove_bg.py image.png
 
-# Custom outline width
-python create_sticker.py input.png output.png --width 30
+# Multiple images (parallel)
+python batch_remove_bg.py image1.png image2.png image3.png --parallel
 
-# Without smoothing
-python create_sticker.py input.png output.png --no-smooth
-
-# Disable automatic background removal
-python create_sticker.py input.png output.png --no-remove-bg
-
-# Use Ollama for analysis
-python create_sticker.py input.png output.png --use-ollama
+# Custom workers
+python batch_remove_bg.py *.png --parallel --workers 4
 ```
 
-### Remove Background Only
+#### Sticker Creation
 
 ```bash
-# Remove background only (no outline)
-python remove_bg.py input.png
+# Single image
+python batch_create_sticker.py image.png
 
-# Specify output file
+# Multiple images (parallel)
+python batch_create_sticker.py image1.png image2.png image3.png --parallel
+
+# Custom outline width
+python batch_create_sticker.py *.png --parallel --width 15
+```
+
+#### Single Image Processing
+
+```bash
+# Create sticker
+python create_sticker.py input.png output.png --width 20
+
+# Remove background only
 python remove_bg.py input.png output.png
 ```
 
-### As Python Module
+## Output Files
 
-```python
-from create_sticker import create_sticker
+- **Background Removal**: Creates files with `_nobg` suffix (e.g., `image_nobg.png`)
+- **Sticker Creation**: Creates files with `_sticker` suffix (e.g., `image_sticker.png`)
 
-create_sticker('input.png', 'output.png', outline_width=20, smooth=True)
-```
+## Supported Formats
 
-## Parameters
-
-- `--width` / `-w`: White outline width in pixels (default: 20)
-- `--no-smooth`: Disable outline smoothing
-- `--no-remove-bg`: Disable automatic background removal
-- `--use-ollama`: Use Ollama for image analysis (requires running Ollama)
-
-## Requirements
-
-- Python 3.8+
-- Pillow
-- NumPy
-- SciPy
-- rembg (for background removal)
-- onnxruntime (required by rembg)
-- requests (for optional Ollama integration)
-
-All dependencies are listed in `requirements.txt`.
-
-## First Run
-
-On first run, if `rembg` is not installed, you'll be prompted to install it. You can choose:
-1. **System-wide installation** (default) - installs for all users
-2. **User-only installation** - installs only for current user
-3. **Cancel** - skip background removal feature
-
-The library will be downloaded and installed automatically.
-
-## Ollama Integration (Optional)
-
-To use Ollama for image analysis:
-
-1. Install [Ollama](https://ollama.ai/)
-2. Pull a vision model:
-   ```bash
-   ollama pull llava:7b
-   ```
-3. Use the `--use-ollama` flag when running the script
-
-**Recommended Ollama models:**
-- `llava:7b` - Fast, good quality (recommended)
-- `llava:13b` - More accurate, slower
-- `llava:34b` - Most accurate, requires more memory
-
-**Note:** Ollama is optional. Background removal works without it using `rembg`.
+- PNG (recommended)
+- JPG/JPEG
+- BMP
+- TIFF
+- WebP
 
 ## How It Works
 
-1. **Background Detection**: Checks if image has a background
-2. **Background Removal** (if needed): Uses `rembg` to remove background, leaving only the subject on transparent background
-3. **Outline Creation**: Adds white outline around the image
-4. **Smoothing** (optional): Applies smoothing for smoother edges
-5. **Output**: Saves final sticker with transparent background
+### Background Removal
+1. Analyzes image for background presence
+2. Uses AI-powered `rembg` library to remove background
+3. Outputs image with transparent background
 
-## Batch Processing
+### Sticker Creation
+1. Removes background (if present)
+2. Adds white outline around the subject
+3. Applies edge smoothing for polished look
+4. Crops to optimal size
 
-For processing multiple images at once:
+## Performance
 
-### Sequential Processing
-- Drag and drop multiple images onto `batch_remove_bg_sequential.bat`
-- Images are processed one after another
-- Safer for systems with limited resources
-- Slower but more stable
+- **Parallel Processing**: Uses all CPU cores (except one) for maximum speed
+- **Sequential Processing**: Processes one image at a time (safer for low-end systems)
+- **Auto-detection**: Automatically detects CPU core count
 
-### Parallel Processing
-- Drag and drop multiple images onto `batch_remove_bg_parallel.bat`
-- Images are processed simultaneously using multiple CPU cores
-- Uses all CPU cores except one (leaves one free to prevent system freeze)
-- Much faster for large batches
-- Automatically detects CPU core count
-
-**Example:**
+Example speeds:
 - 16-core CPU → uses 15 workers
 - 8-core CPU → uses 7 workers
 - 4-core CPU → uses 3 workers
 
-### Command Line
+## Dependencies
 
-```bash
-# Sequential processing
-python batch_remove_bg.py image1.png image2.png image3.png
+Core dependencies (auto-installed):
+- `Pillow` - Image processing
+- `numpy` - Numerical operations
+- `scipy` - Scientific computing
+- `rembg` - Background removal AI
+- `onnxruntime` - Required by rembg
 
-# Parallel processing
-python batch_remove_bg.py image1.png image2.png image3.png --parallel
+Optional:
+- `tkinterdnd2` - Drag-and-drop support (recommended)
 
-# Custom number of workers
-python batch_remove_bg.py *.png --parallel --workers 4
+All dependencies are listed in `requirements.txt`.
+
+## Troubleshooting
+
+### Python not found
+- Make sure Python 3.8+ is installed
+- Add Python to your system PATH
+- Restart your computer after installation
+
+### Drag-and-drop not working
+- Install `tkinterdnd2`: `pip install tkinterdnd2`
+- Or use the "Browse Files" button instead
+
+### Installation fails
+- Run as administrator
+- Check your internet connection
+- Install manually: `pip install rembg onnxruntime tkinterdnd2`
+
+### Processing errors
+- Check that images are valid image files
+- Ensure sufficient disk space
+- Try processing one image at a time
+
+## Project Structure
+
 ```
-
-## Files
-
-- `create_sticker.py` - Main script for creating stickers
-- `remove_bg.py` - Script for background removal only
-- `batch_remove_bg.py` - Batch processing script
-- `create_sticker.bat` - Windows batch file (drag & drop)
-- `remove_bg.bat` - Windows batch file for background removal
-- `batch_remove_bg_sequential.bat` - Batch processing (sequential)
-- `batch_remove_bg_parallel.bat` - Batch processing (parallel)
-- `create_sticker_gui.bat` - GUI version with file picker
-- `requirements.txt` - Python dependencies
-
-## Examples
-
-```bash
-# Create sticker from image with background
-python create_sticker.py character.jpg character_sticker.png
-
-# Create sticker with 15px outline
-python create_sticker.py moose.png moose_sticker.png -w 15
-
-# Remove background only
-python remove_bg.py photo.jpg photo_nobg.png
+sticker-creator/
+├── sticker_gui.py          # Main GUI application
+├── sticker_gui.bat          # Windows launcher (no console)
+├── sticker_gui.vbs         # VBScript launcher
+├── batch_remove_bg.py      # Batch background removal
+├── batch_create_sticker.py # Batch sticker creation
+├── create_sticker.py       # Single sticker creation
+├── remove_bg.py            # Single background removal
+└── requirements.txt        # Python dependencies
 ```
 
 ## License
@@ -196,5 +203,12 @@ This project is open source and available for use.
 
 ## Contributing
 
-Contributions are welcome! Feel free to submit issues or pull requests.
+Contributions are welcome! Feel free to:
+- Report bugs
+- Suggest features
+- Submit pull requests
 
+## Credits
+
+- Uses [rembg](https://github.com/danielgatis/rembg) for background removal
+- Built with Python and tkinter

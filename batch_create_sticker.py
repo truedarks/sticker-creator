@@ -84,10 +84,10 @@ def process_sequential(image_files, outline_width=20):
         
         if success:
             success_count += 1
-            print(f"  ✓ Success: {os.path.basename(output_path)}")
+            print(f"  [OK] Success: {os.path.basename(output_path)}")
         else:
             error_count += 1
-            print(f"  ✗ Error: {error}")
+            print(f"  [ERROR] Error: {error}")
     
     return {
         'total': total,
@@ -140,14 +140,14 @@ def process_parallel(image_files, outline_width=20, max_workers=None):
                 
                 if success:
                     success_count += 1
-                    print(f"[{completed}/{total}] ✓ {os.path.basename(output_path)}")
+                    print(f"[{completed}/{total}] [OK] {os.path.basename(output_path)}")
                 else:
                     error_count += 1
-                    print(f"[{completed}/{total}] ✗ {os.path.basename(image_file)}: {error}")
+                    print(f"[{completed}/{total}] [ERROR] {os.path.basename(image_file)}: {error}")
                     
             except Exception as e:
                 error_count += 1
-                print(f"[{completed}/{total}] ✗ {os.path.basename(image_file)}: {e}")
+                print(f"[{completed}/{total}] [ERROR] {os.path.basename(image_file)}: {e}")
     
     return {
         'total': total,

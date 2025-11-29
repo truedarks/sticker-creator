@@ -78,7 +78,7 @@ def check_and_install_rembg():
     
     try:
         result = subprocess.run(install_cmd, check=True, capture_output=True, text=True)
-        print("✓ Installation completed successfully!")
+        print("[OK] Installation completed successfully!")
         
         # Try to import again
         try:
@@ -266,7 +266,7 @@ def create_sticker(image_path, output_path, outline_width=20, smooth=True, auto_
                 
                 try:
                     remove_background_rembg(image_path, processed_image_path)
-                    print("✓ Background successfully removed")
+                    print("[OK] Background successfully removed")
                 except Exception as e:
                     print(f"Error removing background: {e}")
                     processed_image_path = image_path
@@ -356,7 +356,7 @@ def create_sticker(image_path, output_path, outline_width=20, smooth=True, auto_
     
     result.save(output_path, "PNG")
     
-    print(f"✓ Sticker created: {output_path}")
+    print(f"[OK] Sticker created: {output_path}")
     print(f"  White outline width: {outline_width} pixels")
     print(f"  Original size: {original.width}x{original.height}")
     print(f"  Sticker size: {result.width}x{result.height}")
@@ -390,7 +390,7 @@ def remove_background_only(image_path, output_path=None):
     try:
         print(f"Removing background from: {image_path}")
         result = remove_background_rembg(image_path, output_path)
-        print(f"✓ Background removed. Saved to: {output_path}")
+        print(f"[OK] Background removed. Saved to: {output_path}")
         return result
     except Exception as e:
         print(f"Error: {e}")

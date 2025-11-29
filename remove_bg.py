@@ -68,7 +68,7 @@ def check_and_install_rembg():
     
     try:
         result = subprocess.run(install_cmd, check=True, capture_output=True, text=True)
-        print("✓ Installation completed successfully!")
+        print("[OK] Installation completed successfully!")
         
         # Try to import again
         try:
@@ -121,7 +121,7 @@ def remove_background_only(image_path, output_path=None):
         with open(output_path, 'wb') as output_file:
             output_file.write(output_data)
         
-        print(f"✓ Background removed. Saved to: {output_path}")
+        print(f"[OK] Background removed. Saved to: {output_path}")
         
         from PIL import Image
         return Image.open(output_path).convert("RGBA")
