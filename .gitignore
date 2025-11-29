@@ -61,3 +61,6 @@ test_smart_sticker.png
 !README.md
 !requirements.txt
 
+# Gitpull helper
+setup_github.bat
+

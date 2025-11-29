@@ -425,21 +425,25 @@ Examples:
     
     args = parser.parse_args()
     
+    # Normalize paths
+    input_path = os.path.abspath(os.path.normpath(args.input))
+    output_path = os.path.abspath(os.path.normpath(args.output))
+    
     # Check if input file exists
-    if not os.path.exists(args.input):
-        print(f"Error: File not found: {args.input}", file=sys.stderr)
+    if not os.path.exists(input_path):
+        print(f"Error: File not found: {input_path}", file=sys.stderr)
         print(f"Please check the file path and try again.", file=sys.stderr)
         sys.exit(1)
     
     # Check if input is actually a file
-    if not os.path.isfile(args.input):
-        print(f"Error: Path is not a file: {args.input}", file=sys.stderr)
+    if not os.path.isfile(input_path):
+        print(f"Error: Path is not a file: {input_path}", file=sys.stderr)
         sys.exit(1)
     
     try:
         create_sticker(
-            args.input,
-            args.output,
+            input_path,
+            output_path,
             outline_width=args.width,
             smooth=not args.no_smooth,
             auto_remove_bg=not args.no_remove_bg,
