@@ -7,8 +7,13 @@ Usage:
 
 import sys
 import os
-import argparse
 from pathlib import Path
+
+# Setup local environment first - MUST be imported before any other imports
+from local_env import LOCAL_SITE_PACKAGES
+PROJECT_ROOT = Path(__file__).parent.absolute()
+
+import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing
 
@@ -23,13 +28,14 @@ except ImportError:
     sys.exit(1)
 
 
-def create_sticker_single(image_path, outline_width=20):
+def create_sticker_single(image_path, outline_width=20, bg_method='rembg_cpu'):
     """
     Creates a sticker from a single image.
     
     Args:
         image_path (str): Path to source image
         outline_width (int): White outline width in pixels
+        bg_method (str): Background removal method
     
     Returns:
         tuple: (success: bool, input_path: str, output_path: str, error: str or None)
@@ -50,22 +56,28 @@ def create_sticker_single(image_path, outline_width=20):
             outline_width=outline_width,
             smooth=True,
             auto_remove_bg=True,
-            use_ollama=False
+            use_ollama=False,
+            bg_method=bg_method
         )
         
         return (True, str(input_path), str(output_path), None)
         
     except Exception as e:
+        import traceback
+        error_msg = f"{str(e)}\n{traceback.format_exc()}"
+        print(f"[ERROR] Failed to create sticker from {image_path} with {bg_method}:", file=sys.stderr)
+        print(error_msg, file=sys.stderr)
         return (False, str(image_path), None, str(e))
 
 
-def process_sequential(image_files, outline_width=20):
+def process_sequential(image_files, outline_width=20, bg_method='rembg_cpu'):
     """
     Process images sequentially (one after another).
     
     Args:
         image_files (list): List of image file paths
         outline_width (int): White outline width in pixels
+        bg_method (str): Background removal method
     
     Returns:
         dict: Statistics about processing
@@ -75,12 +87,13 @@ def process_sequential(image_files, outline_width=20):
     error_count = 0
     
     print(f"Processing {total} images sequentially...")
+    print(f"Background removal method: {bg_method}")
     print("=" * 60)
     
     for i, image_file in enumerate(image_files, 1):
         print(f"\n[{i}/{total}] Processing: {os.path.basename(image_file)}")
         
-        success, input_path, output_path, error = create_sticker_single(image_file, outline_width)
+        success, input_path, output_path, error = create_sticker_single(image_file, outline_width, bg_method)
         
         if success:
             success_count += 1
@@ -96,7 +109,7 @@ def process_sequential(image_files, outline_width=20):
     }
 
 
-def process_parallel(image_files, outline_width=20, max_workers=None):
+def process_parallel(image_files, outline_width=20, max_workers=None, bg_method='rembg_cpu'):
     """
     Process images in parallel using multiple threads.
     
@@ -104,6 +117,7 @@ def process_parallel(image_files, outline_width=20, max_workers=None):
         image_files (list): List of image file paths
         outline_width (int): White outline width in pixels
         max_workers (int): Maximum number of worker threads (None = auto-detect)
+        bg_method (str): Background removal method
     
     Returns:
         dict: Statistics about processing
@@ -116,6 +130,7 @@ def process_parallel(image_files, outline_width=20, max_workers=None):
         max_workers = max(1, cpu_count - 1)  # Leave one core free
     
     print(f"Processing {total} images in parallel...")
+    print(f"Background removal method: {bg_method}")
     print(f"Using {max_workers} worker threads (CPU cores: {multiprocessing.cpu_count()})")
     print("=" * 60)
     
@@ -125,7 +140,7 @@ def process_parallel(image_files, outline_width=20, max_workers=None):
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all tasks
         future_to_file = {
-            executor.submit(create_sticker_single, img, outline_width): img 
+            executor.submit(create_sticker_single, img, outline_width, bg_method): img 
             for img in image_files
         }
         
@@ -177,6 +192,9 @@ Examples:
                        help='Number of worker threads for parallel processing (default: CPU cores - 1)')
     parser.add_argument('--width', type=int, default=20,
                        help='White outline width in pixels (default: 20)')
+    parser.add_argument('--method', '-m', default='rembg_cpu',
+                       choices=['rembg_cpu', 'rembg_gpu', 'sam_cpu', 'sam_gpu', 'sam'],
+                       help='Background removal method (default: rembg_cpu)')
     
     args = parser.parse_args()
     
@@ -206,11 +224,15 @@ Examples:
     print(f"\nFound {len(valid_files)} valid image file(s)")
     print("=" * 60)
     
+    if args.method == 'sam':
+        print("Note: 'sam' has been renamed to 'sam_cpu'.")
+        args.method = 'sam_cpu'
+
     # Process images
     if args.parallel:
-        stats = process_parallel(valid_files, outline_width=args.width, max_workers=args.workers)
+        stats = process_parallel(valid_files, outline_width=args.width, max_workers=args.workers, bg_method=args.method)
     else:
-        stats = process_sequential(valid_files, outline_width=args.width)
+        stats = process_sequential(valid_files, outline_width=args.width, bg_method=args.method)
     
     # Print summary
     print("\n" + "=" * 60)

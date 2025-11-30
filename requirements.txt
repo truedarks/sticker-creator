@@ -4,6 +4,15 @@ scipy>=1.11.0
 rembg>=2.0.0
 onnxruntime>=1.15.0
 requests>=2.31.0
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python>=4.8.0
+
+# Optional: for GPU support with rembg
+# onnxruntime-gpu>=1.15.0
+
+# Optional: for SAM (Segment Anything Model)
+# segment-anything>=1.0.0
 
 # Optional: for drag-and-drop in GUI (sticker_gui.py)
 # tkinterdnd2>=0.3.0

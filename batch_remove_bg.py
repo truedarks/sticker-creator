@@ -7,27 +7,40 @@ Usage:
 
 import sys
 import os
-import argparse
 from pathlib import Path
+
+# Setup local environment first - MUST be imported before any other imports
+from local_env import LOCAL_SITE_PACKAGES
+PROJECT_ROOT = Path(__file__).parent.absolute()
+
+import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing
 
-# Import for background removal
+# Import unified background removal
 try:
-    from rembg import remove
-    REMBG_AVAILABLE = True
+    from bg_removal import remove_background, get_available_methods
+    BG_REMOVAL_AVAILABLE = True
 except ImportError:
-    REMBG_AVAILABLE = False
-    print("Error: rembg is not installed. Install with: pip install rembg onnxruntime")
-    sys.exit(1)
+    BG_REMOVAL_AVAILABLE = False
+    # Fallback to old rembg import
+    try:
+        from rembg import remove
+        REMBG_AVAILABLE = True
+    except ImportError:
+        REMBG_AVAILABLE = False
+        print("Error: Background removal libraries not installed.")
+        print("Install with: pip install --target lib/site-packages rembg onnxruntime")
+        sys.exit(1)
 
 
-def remove_background_single(image_path):
+def remove_background_single(image_path, method='rembg_cpu'):
     """
     Removes background from a single image.
     
     Args:
         image_path (str): Path to source image
+        method (str): Method to use ('rembg_cpu', 'rembg_gpu', 'sam_cpu', 'sam_gpu')
     
     Returns:
         tuple: (success: bool, input_path: str, output_path: str, error: str or None)
@@ -41,27 +54,37 @@ def remove_background_single(image_path):
         # Create output filename
         output_path = input_path.parent / f"{input_path.stem}_nobg{input_path.suffix}"
         
-        # Read and process image
-        with open(input_path, 'rb') as input_file:
-            input_data = input_file.read()
-            output_data = remove(input_data)
-        
-        # Save result
-        with open(output_path, 'wb') as output_file:
-            output_file.write(output_data)
+        # Use unified background removal
+        if BG_REMOVAL_AVAILABLE:
+            remove_background(str(input_path), str(output_path), method=method)
+        else:
+            # Fallback to old rembg method
+            if not REMBG_AVAILABLE:
+                return (False, str(image_path), None, "Background removal libraries not available")
+            with open(input_path, 'rb') as input_file:
+                input_data = input_file.read()
+                output_data = remove(input_data)
+            
+            with open(output_path, 'wb') as output_file:
+                output_file.write(output_data)
         
         return (True, str(input_path), str(output_path), None)
         
     except Exception as e:
+        import traceback
+        error_msg = f"{str(e)}\n{traceback.format_exc()}"
+        print(f"[ERROR] Failed to process {image_path} with {method}:", file=sys.stderr)
+        print(error_msg, file=sys.stderr)
         return (False, str(image_path), None, str(e))
 
 
-def process_sequential(image_files):
+def process_sequential(image_files, method='rembg_cpu'):
     """
     Process images sequentially (one after another).
     
     Args:
         image_files (list): List of image file paths
+        method (str): Background removal method
     
     Returns:
         dict: Statistics about processing
@@ -71,12 +94,13 @@ def process_sequential(image_files):
     error_count = 0
     
     print(f"Processing {total} images sequentially...")
+    print(f"Method: {method}")
     print("=" * 60)
     
     for i, image_file in enumerate(image_files, 1):
         print(f"\n[{i}/{total}] Processing: {os.path.basename(image_file)}")
         
-        success, input_path, output_path, error = remove_background_single(image_file)
+        success, input_path, output_path, error = remove_background_single(image_file, method=method)
         
         if success:
             success_count += 1
@@ -92,13 +116,14 @@ def process_sequential(image_files):
     }
 
 
-def process_parallel(image_files, max_workers=None):
+def process_parallel(image_files, max_workers=None, method='rembg_cpu'):
     """
     Process images in parallel using multiple threads.
     
     Args:
         image_files (list): List of image file paths
         max_workers (int): Maximum number of worker threads (None = auto-detect)
+        method (str): Background removal method
     
     Returns:
         dict: Statistics about processing
@@ -111,6 +136,7 @@ def process_parallel(image_files, max_workers=None):
         max_workers = max(1, cpu_count - 1)  # Leave one core free
     
     print(f"Processing {total} images in parallel...")
+    print(f"Method: {method}")
     print(f"Using {max_workers} worker threads (CPU cores: {multiprocessing.cpu_count()})")
     print("=" * 60)
     
@@ -120,7 +146,7 @@ def process_parallel(image_files, max_workers=None):
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all tasks
         future_to_file = {
-            executor.submit(remove_background_single, img): img 
+            executor.submit(remove_background_single, img, method): img 
             for img in image_files
         }
         
@@ -169,12 +195,15 @@ Examples:
                        help='Process images in parallel (uses all CPU cores except one)')
     parser.add_argument('--workers', '-w', type=int, default=None,
                        help='Number of worker threads for parallel processing (default: CPU cores - 1)')
+    parser.add_argument('--method', '-m', default='rembg_cpu',
+                       choices=['rembg_cpu', 'rembg_gpu', 'sam_cpu', 'sam_gpu', 'sam'],
+                       help='Background removal method (default: rembg_cpu)')
     
     args = parser.parse_args()
     
-    # Check if rembg is available
-    if not REMBG_AVAILABLE:
-        print("Error: rembg is not installed.")
+    # Check if background removal is available
+    if not BG_REMOVAL_AVAILABLE and not REMBG_AVAILABLE:
+        print("Error: Background removal libraries are not installed.")
         print("Install with: pip install rembg onnxruntime")
         sys.exit(1)
     
@@ -198,11 +227,16 @@ Examples:
     print(f"\nFound {len(valid_files)} valid image file(s)")
     print("=" * 60)
     
+    # Normalize legacy alias
+    if args.method == 'sam':
+        print("Note: 'sam' method has been renamed to 'sam_cpu'.")
+        args.method = 'sam_cpu'
+
     # Process images
     if args.parallel:
-        stats = process_parallel(valid_files, max_workers=args.workers)
+        stats = process_parallel(valid_files, max_workers=args.workers, method=args.method)
     else:
-        stats = process_sequential(valid_files)
+        stats = process_sequential(valid_files, method=args.method)
     
     # Print summary
     print("\n" + "=" * 60)

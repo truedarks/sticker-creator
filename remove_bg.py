@@ -2,46 +2,75 @@
 Script for removing background from images.
 
 Usage:
-    python remove_bg.py input.png [output.png]
+    python remove_bg.py input.png [output.png] [--method rembg_cpu|rembg_gpu|sam_cpu|sam_gpu]
     
 Or as a module:
     from remove_bg import remove_background_only
-    remove_background_only('input.png', 'output.png')
+    remove_background_only('input.png', 'output.png', method='rembg_cpu')
 """
 
 import sys
 import os
+from pathlib import Path
+
+# Setup local environment first - MUST be imported before any other imports
+from local_env import LOCAL_SITE_PACKAGES
+PROJECT_ROOT = Path(__file__).parent.absolute()
+
 import subprocess
 import argparse
 
-# Import for background removal
+# Import unified background removal
 try:
-    from rembg import remove
-    REMBG_AVAILABLE = True
+    from bg_removal import remove_background, get_available_methods
+    BG_REMOVAL_AVAILABLE = True
 except ImportError:
-    REMBG_AVAILABLE = False
+    BG_REMOVAL_AVAILABLE = False
+    # Fallback to old rembg import
+    try:
+        from rembg import remove
+        REMBG_AVAILABLE = True
+    except ImportError:
+        REMBG_AVAILABLE = False
 
 
-def check_and_install_rembg():
+def check_and_install_dependencies(method='rembg_cpu'):
     """
-    Checks if rembg is installed and prompts user to install it if not.
-    Allows user to choose installation location.
+    Checks if required dependencies are installed and prompts user to install if not.
+    
+    Args:
+        method (str): Method to check ('rembg_cpu', 'rembg_gpu', 'sam_cpu', 'sam_gpu')
     
     Returns:
-        bool: True if rembg is available, False otherwise
+        bool: True if dependencies are available, False otherwise
     """
-    global REMBG_AVAILABLE
+    global BG_REMOVAL_AVAILABLE
     
-    if REMBG_AVAILABLE:
-        return True
+    if BG_REMOVAL_AVAILABLE:
+        available = get_available_methods()
+        if method in available:
+            return True
     
     print("\n" + "="*60)
     print("WARNING: Background removal library not found")
     print("="*60)
-    print("\nThe 'rembg' library will be downloaded for local use.")
-    print("This library is required for background removal.")
-    print("\nThe library will be installed using pip.")
-    print("You can choose to install it:")
+    
+    normalized_method = method if method != 'sam' else 'sam_cpu'
+    
+    if normalized_method in ('sam_cpu', 'sam_gpu'):
+        print("\nThe 'segment-anything' library is required for SAM.")
+        packages = ['segment-anything', 'torch', 'torchvision', 'opencv-python']
+        if normalized_method == 'sam_gpu':
+            print("For GPU acceleration, install the CUDA-enabled PyTorch build.")
+    elif method == 'rembg_gpu':
+        print("\nThe 'rembg' and 'onnxruntime-gpu' libraries are required.")
+        packages = ['rembg', 'onnxruntime-gpu']
+    else:  # rembg_cpu
+        print("\nThe 'rembg' library is required for background removal.")
+        packages = ['rembg', 'onnxruntime']
+    
+    print("\nThe libraries will be installed using pip.")
+    print("You can choose to install them:")
     print("  1. System-wide (default Python installation)")
     print("  2. User-only (current user only)")
     print("  3. Cancel installation")
@@ -50,12 +79,31 @@ def check_and_install_rembg():
         choice = input("\nChoose installation type [1/2/3] (default: 1): ").strip()
         
         if choice == '' or choice == '1':
-            # System-wide installation
-            install_cmd = [sys.executable, '-m', 'pip', 'install', 'rembg', 'onnxruntime']
+            # Install to local project directory
+            LOCAL_SITE_PACKAGES.mkdir(parents=True, exist_ok=True)
+            
+            # Uninstall onnxruntime (CPU) if installing GPU version
+            if method == 'rembg_gpu':
+                print("Checking for conflicting packages...")
+                subprocess.run(
+                    [sys.executable, '-m', 'pip', 'uninstall', '-y', 'onnxruntime'],
+                    capture_output=True
+                )
+            
+            install_cmd = [sys.executable, '-m', 'pip', 'install', '--target', str(LOCAL_SITE_PACKAGES)] + packages
             break
         elif choice == '2':
-            # User-only installation
-            install_cmd = [sys.executable, '-m', 'pip', 'install', '--user', 'rembg', 'onnxruntime']
+            # User-only installation (fallback)
+            
+            # Uninstall onnxruntime (CPU) if installing GPU version
+            if method == 'rembg_gpu':
+                print("Checking for conflicting packages...")
+                subprocess.run(
+                    [sys.executable, '-m', 'pip', 'uninstall', '-y', 'onnxruntime'],
+                    capture_output=True
+                )
+            
+            install_cmd = [sys.executable, '-m', 'pip', 'install', '--user'] + packages
             break
         elif choice == '3':
             print("Installation cancelled. Background removal cannot proceed.")
@@ -63,7 +111,7 @@ def check_and_install_rembg():
         else:
             print("Invalid choice. Please enter 1, 2, or 3.")
     
-    print("\nInstalling rembg and dependencies...")
+    print(f"\nInstalling {', '.join(packages)}...")
     print("This may take a few minutes on first run...")
     
     try:
@@ -72,8 +120,8 @@ def check_and_install_rembg():
         
         # Try to import again
         try:
-            from rembg import remove
-            REMBG_AVAILABLE = True
+            from bg_removal import remove_background, get_available_methods
+            BG_REMOVAL_AVAILABLE = True
             return True
         except ImportError:
             print("Warning: Installation completed but import failed.")
@@ -90,21 +138,22 @@ def check_and_install_rembg():
         return False
 
 
-def remove_background_only(image_path, output_path=None):
+def remove_background_only(image_path, output_path=None, method='rembg_cpu'):
     """
     Removes background from image without adding outline.
     
     Args:
         image_path (str): Path to source image
         output_path (str): Path to save result (if None, creates _nobg.png suffix)
+        method (str): Method to use ('rembg_cpu', 'rembg_gpu', 'sam_cpu', 'sam_gpu')
     
     Returns:
         PIL.Image: Image with background removed, or None on error
     """
-    # Check and install rembg if needed
-    if not REMBG_AVAILABLE:
-        if not check_and_install_rembg():
-            print("Error: rembg not available. Cannot remove background.")
+    # Check and install dependencies if needed
+    if not BG_REMOVAL_AVAILABLE:
+        if not check_and_install_dependencies(method):
+            print(f"Error: {method} not available. Cannot remove background.")
             return None
     
     if output_path is None:
@@ -112,19 +161,12 @@ def remove_background_only(image_path, output_path=None):
         output_path = f"{base}_nobg.png"
     
     try:
-        print(f"Removing background from: {image_path}")
+        print(f"Removing background from: {image_path} (method: {method})")
         
-        with open(image_path, 'rb') as input_file:
-            input_data = input_file.read()
-            output_data = remove(input_data)
-        
-        with open(output_path, 'wb') as output_file:
-            output_file.write(output_data)
+        result = remove_background(image_path, output_path, method=method)
         
         print(f"[OK] Background removed. Saved to: {output_path}")
-        
-        from PIL import Image
-        return Image.open(output_path).convert("RGBA")
+        return result
         
     except Exception as e:
         print(f"Error removing background: {e}")
@@ -140,21 +182,36 @@ def main():
 Examples:
   python remove_bg.py input.png
   python remove_bg.py input.png output.png
+  python remove_bg.py input.png --method rembg_gpu
+  python remove_bg.py input.png --method sam_cpu
         """
     )
     
     parser.add_argument('input', help='Path to source image')
     parser.add_argument('output', nargs='?', default=None,
                        help='Path to save result (default: input_nobg.png)')
+    parser.add_argument('--method', '-m', default='rembg_cpu',
+                       choices=['rembg_cpu', 'rembg_gpu', 'sam_cpu', 'sam_gpu', 'sam'],
+                       help='Background removal method (default: rembg_cpu)')
     
     args = parser.parse_args()
+    
+    if args.method == 'sam':
+        print("Note: 'sam' has been renamed to 'sam_cpu'. Using CPU mode.\n")
+        args.method = 'sam_cpu'
+    
+    if args.method in ('sam_cpu', 'sam_gpu'):
+        print("SAM methods require: segment-anything, torch, torchvision, opencv-python")
+        if args.method == 'sam_gpu':
+            print("For GPU support install CUDA-enabled PyTorch from https://pytorch.org/get-started/locally/")
+        print()
     
     if not os.path.exists(args.input):
         print(f"Error: File not found: {args.input}")
         sys.exit(1)
     
     try:
-        result = remove_background_only(args.input, args.output)
+        result = remove_background_only(args.input, args.output, method=args.method)
         if result is None:
             sys.exit(1)
     except Exception as e:

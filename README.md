@@ -7,11 +7,15 @@ A user-friendly Python application for batch processing images: removing backgro
 ## Features
 
 - 🎨 **Smart Background Removal**: Automatically detects and removes backgrounds from images
+  - **rembg CPU**: Fast CPU-based background removal (default)
+  - **rembg GPU**: GPU-accelerated processing (requires CUDA)
+  - **SAM**: Segment Anything Model for advanced segmentation
 - ✨ **Sticker Creation**: Creates stickers with customizable white outlines
 - 🚀 **Batch Processing**: Process multiple images simultaneously using parallel processing
 - 🖱️ **Drag & Drop Interface**: Simple GUI with drag-and-drop support
 - ⚡ **Fast Processing**: Uses all CPU cores for maximum speed
 - 🎯 **Automatic Setup**: Installs required dependencies on first run
+- 🔍 **Debug Mode**: Detailed logging for troubleshooting
 
 ## Quick Start
 
@@ -47,6 +51,8 @@ If any are missing, you'll be prompted to install them. The installation is auto
 
 Just run `sticker_gui.bat` - dependencies will be installed automatically if needed.
 
+**Note:** All dependencies are installed locally in the `lib/site-packages` folder, making the project self-contained.
+
 ### Manual Installation
 
 ```bash
@@ -54,15 +60,28 @@ Just run `sticker_gui.bat` - dependencies will be installed automatically if nee
 git clone https://github.com/truedarks/sticker-creator.git
 cd sticker-creator
 
-# Install dependencies
+# Install dependencies locally (recommended)
+pip install --target lib/site-packages -r requirements.txt
+
+# Or install globally (not recommended)
 pip install -r requirements.txt
 
 # Optional: Install drag-and-drop support
-pip install tkinterdnd2
+pip install --target lib/site-packages tkinterdnd2
 
 # Run the GUI
 python sticker_gui.py
 ```
+
+### Local Dependencies
+
+The project uses local dependencies stored in `lib/site-packages/`. This means:
+- ✅ All dependencies are in the project folder
+- ✅ No conflicts with other Python projects
+- ✅ Easy to transfer to another computer
+- ✅ Self-contained project
+
+See `README_LOCAL.md` for more details about local dependency management.
 
 ## Usage
 
@@ -78,37 +97,73 @@ python sticker_gui.py
 #### Background Removal
 
 ```bash
-# Single image
+# Single image (CPU)
 python batch_remove_bg.py image.png
 
-# Multiple images (parallel)
+# Multiple images (parallel, CPU)
 python batch_remove_bg.py image1.png image2.png image3.png --parallel
 
+# Using GPU acceleration
+python batch_remove_bg.py *.png --parallel --method rembg_gpu
+
+# Using SAM (Segment Anything Model) on CPU
+python batch_remove_bg.py *.png --parallel --method sam_cpu
+
+# Using SAM with GPU acceleration
+python batch_remove_bg.py *.png --parallel --method sam_gpu
+
 # Custom workers
-python batch_remove_bg.py *.png --parallel --workers 4
+python batch_remove_bg.py *.png --parallel --workers 4 --method rembg_cpu
 ```
 
 #### Sticker Creation
 
 ```bash
-# Single image
+# Single image (CPU)
 python batch_create_sticker.py image.png
 
-# Multiple images (parallel)
+# Multiple images (parallel, CPU)
 python batch_create_sticker.py image1.png image2.png image3.png --parallel
 
+# Using GPU acceleration
+python batch_create_sticker.py *.png --parallel --method rembg_gpu
+
+# Using SAM (CPU)
+python batch_create_sticker.py *.png --parallel --method sam_cpu
+
+# Using SAM (GPU)
+python batch_create_sticker.py *.png --parallel --method sam_gpu
+
 # Custom outline width
-python batch_create_sticker.py *.png --parallel --width 15
+python batch_create_sticker.py *.png --parallel --width 15 --method rembg_cpu
 ```
 
 #### Single Image Processing
 
 ```bash
-# Create sticker
+# Create sticker (CPU)
 python create_sticker.py input.png output.png --width 20
 
-# Remove background only
+# Create sticker with GPU
+python create_sticker.py input.png output.png --width 20 --bg-method rembg_gpu
+
+# Create sticker with SAM (CPU)
+python create_sticker.py input.png output.png --width 20 --bg-method sam_cpu
+
+# Create sticker with SAM (GPU)
+python create_sticker.py input.png output.png --width 20 --bg-method sam_gpu
+
+# Remove background only (CPU)
 python remove_bg.py input.png output.png
+
+# Remove background with GPU
+python remove_bg.py input.png output.png --method rembg_gpu
+
+# Remove background with SAM (CPU)
+python remove_bg.py input.png output.png --method sam_cpu
+
+# Remove background with SAM (GPU)
+python remove_bg.py input.png output.png --method sam_gpu
 ```
 
 ## Output Files
@@ -183,6 +238,28 @@ All dependencies are listed in `requirements.txt`.
 - Ensure sufficient disk space
 - Try processing one image at a time
 
+### Debug mode
+To enable detailed logging for troubleshooting:
+```bash
+# Windows PowerShell
+$env:STICKER_DEBUG="1"
+python sticker_gui.py
+
+# Windows CMD
+set STICKER_DEBUG=1
+python sticker_gui.py
+
+# Linux/Mac
+export STICKER_DEBUG=1
+python sticker_gui.py
+```
+
+Debug logs will show:
+- Library import status
+- GPU availability checks
+- Detailed error messages with stack traces
+- Processing steps for each method
+
 ## Project Structure
 
 ```
@@ -190,6 +267,7 @@ sticker-creator/
 ├── sticker_gui.py          # Main GUI application
 ├── sticker_gui.bat          # Windows launcher (no console)
 ├── sticker_gui.vbs         # VBScript launcher
+├── bg_removal.py          # Unified background removal module
 ├── batch_remove_bg.py      # Batch background removal
 ├── batch_create_sticker.py # Batch sticker creation
 ├── create_sticker.py       # Single sticker creation

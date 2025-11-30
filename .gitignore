@@ -4,63 +4,34 @@ __pycache__/
 *$py.class
 *.so
 .Python
-env/
-venv/
-ENV/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
+
+# Local packages
 lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+local_packages.pth
 
-# Test images and outputs
-*.png
-*.jpg
-*.jpeg
-!Camp Logo - White.png
-!HCPS.png
-!Group 239.png
-
-# CSV files
-*.csv
+# Virtual environments
+venv/
+env/
+ENV/
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
 
 # OS
 .DS_Store
 Thumbs.db
-desktop.ini
 
-# Temporary files
-test/
-create sticker bcp/
-test_smart_sticker.png
+# Project specific
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tiff
+*.webp
+!test/*.png
 
-# Keep only source files
-!create_sticker.py
-!remove_bg.py
-!create_sticker.bat
-!create_sticker_gui.bat
-!create_sticker_simple.bat
-!remove_bg.bat
-!README.md
-!requirements.txt
-
-# Gitpull helper
-setup_github.bat
-
+# SAM checkpoints
+.sam_checkpoints/

@@ -9,20 +9,31 @@ Or as a module:
     create_sticker('input.png', 'output.png', outline_width=20)
 """
 
+# Setup local environment first - MUST be imported before any other imports
+from local_env import LOCAL_SITE_PACKAGES
+import sys
+from pathlib import Path
+PROJECT_ROOT = Path(__file__).parent.absolute()
+
 from PIL import Image, ImageFilter
 import numpy as np
 from scipy import ndimage
 import argparse
-import sys
 import os
 import subprocess
 
-# Import for background removal
+# Import unified background removal
 try:
-    from rembg import remove
-    REMBG_AVAILABLE = True
+    from bg_removal import remove_background, get_available_methods
+    BG_REMOVAL_AVAILABLE = True
 except ImportError:
-    REMBG_AVAILABLE = False
+    BG_REMOVAL_AVAILABLE = False
+    # Fallback to old rembg import
+    try:
+        from rembg import remove
+        REMBG_AVAILABLE = True
+    except ImportError:
+        REMBG_AVAILABLE = False
 
 # Import for Ollama (optional)
 try:
@@ -60,11 +71,12 @@ def check_and_install_rembg():
         choice = input("\nChoose installation type [1/2/3] (default: 1): ").strip()
         
         if choice == '' or choice == '1':
-            # System-wide installation
-            install_cmd = [sys.executable, '-m', 'pip', 'install', 'rembg', 'onnxruntime']
+            # Install to local project directory
+            LOCAL_SITE_PACKAGES.mkdir(parents=True, exist_ok=True)
+            install_cmd = [sys.executable, '-m', 'pip', 'install', '--target', str(LOCAL_SITE_PACKAGES), 'rembg', 'onnxruntime']
             break
         elif choice == '2':
-            # User-only installation
+            # User-only installation (fallback)
             install_cmd = [sys.executable, '-m', 'pip', 'install', '--user', 'rembg', 'onnxruntime']
             break
         elif choice == '3':
@@ -129,19 +141,20 @@ def needs_background_removal(image_path):
         return True
 
 
-def remove_background_rembg(image_path, output_path=None):
+def remove_background_unified(image_path, output_path=None, method='rembg_cpu'):
     """
-    Removes background from image using rembg.
+    Removes background from image using specified method.
     
     Args:
         image_path (str): Path to source image
         output_path (str): Path to save (if None, overwrites source)
+        method (str): Method to use ('rembg_cpu', 'rembg_gpu', 'sam_cpu', 'sam_gpu')
     
     Returns:
         PIL.Image: Image with background removed
     """
-    if not REMBG_AVAILABLE:
-        raise ImportError("rembg is not installed. Install with: pip install rembg")
+    if not BG_REMOVAL_AVAILABLE:
+        raise ImportError(f"{method} is not available. Install required dependencies.")
     
     # Normalize and check input file path
     image_path = os.path.abspath(os.path.normpath(image_path))
@@ -151,22 +164,10 @@ def remove_background_rembg(image_path, output_path=None):
         raise ValueError(f"Path is not a file: {image_path}")
     
     try:
-        with open(image_path, 'rb') as input_file:
-            input_data = input_file.read()
-            output_data = remove(input_data)
-        
-        # Save to temporary file if needed
-        if output_path is None:
-            output_path = image_path
-        
-        with open(output_path, 'wb') as output_file:
-            output_file.write(output_data)
-        
-        # Open and return as PIL Image
-        result = Image.open(output_path).convert("RGBA")
+        result = remove_background(image_path, output_path, method=method)
         return result
     except Exception as e:
-        print(f"Error removing background: {e}")
+        print(f"Error removing background with {method}: {e}")
         raise
 
 
@@ -213,7 +214,7 @@ def analyze_with_ollama(image_path, model="llava"):
         return None
 
 
-def create_sticker(image_path, output_path, outline_width=20, smooth=True, auto_remove_bg=True, use_ollama=False):
+def create_sticker(image_path, output_path, outline_width=20, smooth=True, auto_remove_bg=True, use_ollama=False, bg_method='rembg_cpu'):
     """
     Creates a sticker with white outline from an image.
     Automatically removes background if present.
@@ -225,6 +226,7 @@ def create_sticker(image_path, output_path, outline_width=20, smooth=True, auto_
         smooth (bool): Use outline smoothing (default True)
         auto_remove_bg (bool): Automatically remove background if present (default True)
         use_ollama (bool): Use Ollama for image analysis (default False)
+        bg_method (str): Background removal method ('rembg_cpu', 'rembg_gpu', 'sam_cpu', 'sam_gpu')
     
     Returns:
         PIL.Image: Created sticker image
@@ -241,11 +243,10 @@ def create_sticker(image_path, output_path, outline_width=20, smooth=True, auto_
     temp_file = None
     
     if auto_remove_bg:
-        # Check and install rembg if needed
-        if not REMBG_AVAILABLE:
-            if not check_and_install_rembg():
-                print("Warning: rembg not available. Skipping background removal.")
-                print("Install with: pip install rembg")
+        # Check if background removal is available
+        if not BG_REMOVAL_AVAILABLE:
+            print(f"Warning: {bg_method} not available. Skipping background removal.")
+            print(f"Install required dependencies for {bg_method}.")
         
         if use_ollama and OLLAMA_AVAILABLE:
             print("Analyzing image with Ollama...")
@@ -254,10 +255,10 @@ def create_sticker(image_path, output_path, outline_width=20, smooth=True, auto_
                 print(f"Ollama analysis: {analysis}")
         
         if needs_background_removal(image_path):
-            if not REMBG_AVAILABLE:
-                print("Warning: rembg not installed. Skipping background removal.")
+            if not BG_REMOVAL_AVAILABLE:
+                print(f"Warning: {bg_method} not available. Skipping background removal.")
             else:
-                print("Background detected. Removing background...")
+                print(f"Background detected. Removing background using {bg_method}...")
                 # Create temporary file for processed image
                 import tempfile
                 temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
@@ -265,8 +266,8 @@ def create_sticker(image_path, output_path, outline_width=20, smooth=True, auto_
                 processed_image_path = temp_file.name
                 
                 try:
-                    remove_background_rembg(image_path, processed_image_path)
-                    print("[OK] Background successfully removed")
+                    remove_background_unified(image_path, processed_image_path, method=bg_method)
+                    print(f"[OK] Background successfully removed using {bg_method}")
                 except Exception as e:
                     print(f"Error removing background: {e}")
                     processed_image_path = image_path
@@ -366,30 +367,30 @@ def create_sticker(image_path, output_path, outline_width=20, smooth=True, auto_
     return result
 
 
-def remove_background_only(image_path, output_path=None):
+def remove_background_only(image_path, output_path=None, method='rembg_cpu'):
     """
     Removes background from image without adding outline.
     
     Args:
         image_path (str): Path to source image
         output_path (str): Path to save result (if None, creates _nobg.png suffix)
+        method (str): Background removal method ('rembg_cpu', 'rembg_gpu', 'sam_cpu', 'sam_gpu')
     
     Returns:
         PIL.Image: Image with background removed
     """
-    # Check and install rembg if needed
-    if not REMBG_AVAILABLE:
-        if not check_and_install_rembg():
-            print("Error: rembg not available. Cannot remove background.")
-            return None
+    # Check if background removal is available
+    if not BG_REMOVAL_AVAILABLE:
+        print(f"Error: {method} not available. Cannot remove background.")
+        return None
     
     if output_path is None:
         base, ext = os.path.splitext(image_path)
         output_path = f"{base}_nobg.png"
     
     try:
-        print(f"Removing background from: {image_path}")
-        result = remove_background_rembg(image_path, output_path)
+        print(f"Removing background from: {image_path} (method: {method})")
+        result = remove_background_unified(image_path, output_path, method=method)
         print(f"[OK] Background removed. Saved to: {output_path}")
         return result
     except Exception as e:
@@ -422,8 +423,15 @@ Examples:
                        help='Disable automatic background removal')
     parser.add_argument('--use-ollama', action='store_true',
                        help='Use Ollama for image analysis (requires running Ollama)')
+    parser.add_argument('--bg-method', '-m', default='rembg_cpu',
+                       choices=['rembg_cpu', 'rembg_gpu', 'sam_cpu', 'sam_gpu', 'sam'],
+                       help='Background removal method (default: rembg_cpu)')
     
     args = parser.parse_args()
+    
+    if args.bg_method == 'sam':
+        print("Note: 'sam' has been renamed to 'sam_cpu'. Using CPU mode.")
+        args.bg_method = 'sam_cpu'
     
     # Normalize paths
     input_path = os.path.abspath(os.path.normpath(args.input))
@@ -447,7 +455,8 @@ Examples:
             outline_width=args.width,
             smooth=not args.no_smooth,
             auto_remove_bg=not args.no_remove_bg,
-            use_ollama=args.use_ollama
+            use_ollama=args.use_ollama,
+            bg_method=args.bg_method
         )
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
