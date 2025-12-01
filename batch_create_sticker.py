@@ -82,30 +82,41 @@ def process_sequential(image_files, outline_width=20, bg_method='rembg_cpu'):
     Returns:
         dict: Statistics about processing
     """
+    import time
+    
     total = len(image_files)
     success_count = 0
     error_count = 0
     
     print(f"Processing {total} images sequentially...")
     print(f"Background removal method: {bg_method}")
+    if bg_method in ('sam_cpu', 'sam_gpu'):
+        print(f"Note: SAM model will be loaded once and reused for all images.")
     print("=" * 60)
+    
+    total_start = time.time()
     
     for i, image_file in enumerate(image_files, 1):
         print(f"\n[{i}/{total}] Processing: {os.path.basename(image_file)}")
         
+        start_time = time.time()
         success, input_path, output_path, error = create_sticker_single(image_file, outline_width, bg_method)
+        elapsed = time.time() - start_time
         
         if success:
             success_count += 1
-            print(f"  [OK] Success: {os.path.basename(output_path)}")
+            print(f"  [OK] Success: {os.path.basename(output_path)} ({elapsed:.1f}s)")
         else:
             error_count += 1
             print(f"  [ERROR] Error: {error}")
     
+    total_elapsed = time.time() - total_start
+    
     return {
         'total': total,
         'success': success_count,
-        'errors': error_count
+        'errors': error_count,
+        'total_time': total_elapsed
     }
 
 
@@ -123,6 +134,14 @@ def process_parallel(image_files, outline_width=20, max_workers=None, bg_method=
         dict: Statistics about processing
     """
     total = len(image_files)
+    
+    # For SAM methods, parallel processing is not efficient because:
+    # - SAM model is cached and shared
+    # - GPU operations are serialized anyway
+    # - Multiple threads would just compete for GPU/CPU resources
+    if bg_method in ('sam_cpu', 'sam_gpu'):
+        print(f"Note: SAM methods use a cached model, switching to sequential processing for efficiency.")
+        return process_sequential(image_files, outline_width=outline_width, bg_method=bg_method)
     
     # Determine number of workers (all cores except one)
     if max_workers is None:
@@ -241,6 +260,10 @@ Examples:
     print(f"Total images: {stats['total']}")
     print(f"Successful: {stats['success']}")
     print(f"Errors: {stats['errors']}")
+    if 'total_time' in stats:
+        total_time = stats['total_time']
+        avg_time = total_time / stats['total'] if stats['total'] > 0 else 0
+        print(f"Total time: {total_time:.1f}s (avg: {avg_time:.1f}s per image)")
     print("=" * 60)
     
     if stats['errors'] > 0:

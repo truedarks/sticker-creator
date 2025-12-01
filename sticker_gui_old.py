@@ -407,19 +407,13 @@ class StickerGUI:
                     
                     self.package_size_info.configure(text=size_text, foreground="blue")
                     self.install_button.configure(state=tk.NORMAL)
-                    # Show button if it was hidden
-                    try:
-                        self.install_button.pack_info()
-                    except tk.TclError:
-                        # Button was hidden, show it again
-                        self.install_button.pack(side=tk.LEFT, padx=(0, 5))
                 else:
                     self.package_size_info.configure(text="")
-                    self.install_button.pack_forget()  # Hide button if no packages needed
+                    self.install_button.configure(state=tk.DISABLED)
             else:
-                # Hide requirements and button when method is available
+                # Hide requirements when method is available
                 self.package_size_info.configure(text="")
-                self.install_button.pack_forget()  # Hide button completely when method is available
+                self.install_button.configure(state=tk.DISABLED)
                 
         except Exception as e:
             # Fallback to basic info
@@ -448,18 +442,12 @@ class StickerGUI:
                         foreground="blue"
                     )
                     self.install_button.configure(state=tk.NORMAL)
-                    # Show button if it was hidden
-                    try:
-                        self.install_button.pack_info()
-                    except tk.TclError:
-                        # Button was hidden, show it again
-                        self.install_button.pack(side=tk.LEFT, padx=(0, 5))
                 else:
                     self.package_size_info.configure(text="")
-                    self.install_button.pack_forget()  # Hide button if no packages needed
+                    self.install_button.configure(state=tk.DISABLED)
             except:
                 self.package_size_info.configure(text="")
-                self.install_button.pack_forget()  # Hide button on error
+                self.install_button.configure(state=tk.DISABLED)
         
         self.method_info.configure(text=info)
         
@@ -472,18 +460,10 @@ class StickerGUI:
             self.method_info.configure(foreground="gray")
         
         # Enable/disable LLM censor button based on method (always check, regardless of availability)
-        # Hide button completely for rembg methods, show only for SAM methods
         if method in ('sam_cpu', 'sam_gpu'):
             self.llm_censor_button.configure(state=tk.NORMAL)
-            # Make sure button is visible (pack it if it was hidden)
-            try:
-                self.llm_censor_button.pack_info()
-            except tk.TclError:
-                # Button was hidden, show it again
-                self.llm_censor_button.pack(side=tk.LEFT, padx=(0, 5))
         else:
-            # Hide button completely for rembg methods
-            self.llm_censor_button.pack_forget()
+            self.llm_censor_button.configure(state=tk.DISABLED)
     
     def open_llm_censor_settings(self):
         """Open LLM censor settings window."""
@@ -1345,15 +1325,6 @@ class StickerGUI:
             # Wait for completion
             stdout, stderr = process.communicate()
             
-            # Check if any output files were created (even if process failed)
-            output_files_found = []
-            if mode == "remove_bg":
-                for file_path in files:
-                    input_path = Path(file_path)
-                    output_path = input_path.parent / f"{input_path.stem}_nobg{input_path.suffix}"
-                    if output_path.exists():
-                        output_files_found.append(str(output_path))
-            
             # Update status
             if process.returncode == 0:
                 status_label.after(0, lambda: status_label.configure(
@@ -1361,61 +1332,15 @@ class StickerGUI:
                     foreground="green"
                 ))
             else:
-                # Build error message
-                error_code = process.returncode
-                error_msg = f"[ERROR] Error (code: {error_code})"
-                
-                # Decode Windows error codes
-                if error_code == 3221226505:  # 0xC0000005 STATUS_ACCESS_VIOLATION
-                    error_msg += "\nКритическая ошибка доступа к памяти"
-                    error_msg += "\nВозможные причины:"
-                    error_msg += "\n• Проблемы с CUDA/GPU драйверами"
-                    error_msg += "\n• Конфликт библиотек (onnxruntime, torch)"
-                    error_msg += "\n• Недостаточно памяти"
-                    if method in ('rembg_gpu', 'sam_gpu'):
-                        error_msg += "\n\nПопробуйте:"
-                        error_msg += "\n• Использовать CPU метод (rembg_cpu)"
-                        error_msg += "\n• Обновить драйверы NVIDIA"
-                        error_msg += "\n• Перезапустить приложение"
-                
-                # Check if any files were saved despite error
-                if output_files_found:
-                    error_msg += f"\n\n✓ Сохранено файлов: {len(output_files_found)}"
-                    error_msg += "\n(Часть обработки завершилась успешно)"
-                
-                # Add stderr details if available
-                if stderr:
-                    stderr_lines = stderr.strip().split('\n')
-                    # Get last few error lines
-                    last_errors = [line for line in stderr_lines if line.strip()][-3:]
-                    if last_errors:
-                        error_msg += "\n\nДетали ошибки:"
-                        for line in last_errors:
-                            if len(line) > 100:
-                                line = line[:100] + "..."
-                            error_msg += f"\n{line}"
-                    print(f"Error details: {stderr}", file=sys.stderr)
-                
-                # Show error in status (truncate if too long)
-                display_msg = error_msg
-                if len(display_msg) > 150:
-                    display_msg = display_msg[:147] + "..."
-                
-                status_label.after(0, lambda msg=display_msg: status_label.configure(
-                    text=msg,
+                status_label.after(0, lambda: status_label.configure(
+                    text=f"[ERROR] Error (code: {process.returncode})",
                     foreground="red"
                 ))
-                
-                # Also show full error in messagebox for critical errors
-                if error_code == 3221226505:
-                    self.root.after(100, lambda: messagebox.showerror(
-                        "Критическая ошибка",
-                        error_msg
-                    ))
+                if stderr:
+                    print(f"Error: {stderr}", file=sys.stderr)
             
-            # Reset status after 5 seconds (longer for errors)
-            reset_delay = 5000 if process.returncode != 0 else 3000
-            self.root.after(reset_delay, lambda: status_label.configure(
+            # Reset status after 3 seconds
+            self.root.after(3000, lambda: status_label.configure(
                 text="Ready",
                 foreground="gray"
             ))

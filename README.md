@@ -10,6 +10,7 @@ A user-friendly Python application for batch processing images: removing backgro
   - **rembg CPU**: Fast CPU-based background removal (default)
   - **rembg GPU**: GPU-accelerated processing (requires CUDA)
   - **SAM**: Segment Anything Model for advanced segmentation
+  - **LLM Censor** (NEW): AI-powered quality control for SAM using Ollama vision models
 - ✨ **Sticker Creation**: Creates stickers with customizable white outlines
 - 🚀 **Batch Processing**: Process multiple images simultaneously using parallel processing
 - 🖱️ **Drag & Drop Interface**: Simple GUI with drag-and-drop support
@@ -112,6 +113,9 @@ python batch_remove_bg.py *.png --parallel --method sam_cpu
 # Using SAM with GPU acceleration
 python batch_remove_bg.py *.png --parallel --method sam_gpu
 
+# Using SAM with LLM censor for quality control (requires Ollama)
+python batch_remove_bg.py *.png --method sam_cpu --llm-censor --llm-model llava:13b
+
 # Custom workers
 python batch_remove_bg.py *.png --parallel --workers 4 --method rembg_cpu
 ```
@@ -192,6 +196,14 @@ python remove_bg.py input.png output.png --method sam_gpu
 3. Applies edge smoothing for polished look
 4. Crops to optimal size
 
+### LLM Censor (SAM Quality Control)
+When using SAM methods with `--llm-censor` flag:
+1. **Parallel Analysis**: LLM analyzes the original image to identify the main object
+2. **Segmentation**: SAM generates masks to remove background
+3. **Quality Evaluation**: LLM evaluates the segmentation result
+4. **Iterative Improvement**: If quality is insufficient, LLM suggests parameter adjustments and SAM retries
+5. **Final Output**: Best result is saved after up to 3 iterations
+
 ## Performance
 
 - **Parallel Processing**: Uses all CPU cores (except one) for maximum speed
@@ -214,8 +226,63 @@ Core dependencies (auto-installed):
 
 Optional:
 - `tkinterdnd2` - Drag-and-drop support (recommended)
+- `requests` - Required for LLM censor (Ollama API)
+- `segment-anything` - Required for SAM methods
+- `torch`, `torchvision` - Required for SAM methods
+- `opencv-python` - Required for SAM methods
 
 All dependencies are listed in `requirements.txt`.
+
+## LLM Censor Setup
+
+The LLM censor feature uses Ollama with vision models to improve SAM segmentation quality.
+
+### Prerequisites
+1. **Install Ollama**: Download from [ollama.ai](https://ollama.ai)
+2. **Start Ollama**: Run `ollama serve` (usually runs automatically)
+3. **Install Vision Model**: 
+   ```bash
+   ollama pull llava:13b
+   # or
+   ollama pull llava-next:latest
+   ```
+
+### Recommended Models
+- **llava:13b** (recommended): Best balance of quality and speed
+- **llava-next:latest**: Latest version with improved vision understanding
+- **llava:7b**: Faster but less accurate
+- **qwen2.5-vl**: Alternative vision model
+
+### Usage Examples
+
+```bash
+# Basic usage with LLM censor
+python batch_remove_bg.py image.png --method sam_cpu --llm-censor
+
+# Custom model and iterations
+python batch_remove_bg.py image.png --method sam_cpu --llm-censor --llm-model llava-next:latest --llm-iterations 5
+
+# Custom Ollama URL (if running on different host/port)
+python batch_remove_bg.py image.png --method sam_cpu --llm-censor --llm-url http://localhost:11434
+```
+
+### How LLM Censor Works
+1. **Image Analysis**: LLM analyzes the original image to understand the main subject
+2. **Segmentation**: SAM removes background using current parameters
+3. **Quality Check**: LLM evaluates if the segmentation captured the object correctly
+4. **Parameter Tuning**: If quality is low, LLM suggests adjustments to SAM parameters:
+   - `points_per_side`: More points = more detailed masks
+   - `pred_iou_thresh`: Higher = stricter mask selection
+   - `stability_score_thresh`: Higher = more stable masks
+   - `min_mask_region_area`: Higher = filters small artifacts
+5. **Retry**: SAM regenerates masks with new parameters
+6. **Best Result**: After up to 3 iterations, the best result is saved
+
+### Notes
+- LLM censor only works with SAM methods (`sam_cpu`, `sam_gpu`)
+- Parallel processing is automatically disabled when LLM censor is enabled (for thread safety)
+- Processing time increases with LLM censor (each iteration requires LLM evaluation)
+- Make sure Ollama is running before using LLM censor
 
 ## Troubleshooting
 
@@ -260,6 +327,57 @@ Debug logs will show:
 - Detailed error messages with stack traces
 - Processing steps for each method
 
+## LLM Censor Setup
+
+The LLM censor feature uses Ollama with vision models to improve SAM segmentation quality.
+
+### Prerequisites
+1. **Install Ollama**: Download from [ollama.ai](https://ollama.ai)
+2. **Start Ollama**: Run `ollama serve` (usually runs automatically)
+3. **Install Vision Model**: 
+   ```bash
+   ollama pull llava:13b
+   # or
+   ollama pull llava-next:latest
+   ```
+
+### Recommended Models
+- **llava:13b** (recommended): Best balance of quality and speed
+- **llava-next:latest**: Latest version with improved vision understanding
+- **llava:7b**: Faster but less accurate
+- **qwen2.5-vl**: Alternative vision model
+
+### Usage Examples
+
+```bash
+# Basic usage with LLM censor
+python batch_remove_bg.py image.png --method sam_cpu --llm-censor
+
+# Custom model and iterations
+python batch_remove_bg.py image.png --method sam_cpu --llm-censor --llm-model llava-next:latest --llm-iterations 5
+
+# Custom Ollama URL (if running on different host/port)
+python batch_remove_bg.py image.png --method sam_cpu --llm-censor --llm-url http://localhost:11434
+```
+
+### How LLM Censor Works
+1. **Image Analysis**: LLM analyzes the original image to understand the main subject
+2. **Segmentation**: SAM removes background using current parameters
+3. **Quality Check**: LLM evaluates if the segmentation captured the object correctly
+4. **Parameter Tuning**: If quality is low, LLM suggests adjustments to SAM parameters:
+   - `points_per_side`: More points = more detailed masks
+   - `pred_iou_thresh`: Higher = stricter mask selection
+   - `stability_score_thresh`: Higher = more stable masks
+   - `min_mask_region_area`: Higher = filters small artifacts
+5. **Retry**: SAM regenerates masks with new parameters
+6. **Best Result**: After up to 3 iterations, the best result is saved
+
+### Notes
+- LLM censor only works with SAM methods (`sam_cpu`, `sam_gpu`)
+- Parallel processing is automatically disabled when LLM censor is enabled (for thread safety)
+- Processing time increases with LLM censor (each iteration requires LLM evaluation)
+- Make sure Ollama is running before using LLM censor
+
 ## Project Structure
 
 ```
@@ -268,6 +386,7 @@ sticker-creator/
 ├── sticker_gui.bat          # Windows launcher (no console)
 ├── sticker_gui.vbs         # VBScript launcher
 ├── bg_removal.py          # Unified background removal module
+├── llm_censor.py          # LLM censor for SAM quality control
 ├── batch_remove_bg.py      # Batch background removal
 ├── batch_create_sticker.py # Batch sticker creation
 ├── create_sticker.py       # Single sticker creation

@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "model": "llava:13b",
+  "url": "http://localhost:11434",
+  "iterations": 1,
+  "save_successful": true
+}

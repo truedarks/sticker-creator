@@ -20,6 +20,7 @@ import traceback
 from PIL import Image
 import numpy as np
 import subprocess
+import json
 
 # Enable verbose logging
 DEBUG = os.environ.get('STICKER_DEBUG', '0') == '1'
@@ -34,6 +35,25 @@ def log_error(message, exc_info=None):
     print(f"[ERROR] {message}", file=sys.stderr)
     if exc_info:
         traceback.print_exception(*exc_info, file=sys.stderr)
+
+# Try to import LLM censor
+try:
+    from llm_censor import create_llm_censor, OllamaLLMCensor
+    LLM_CENSOR_AVAILABLE = True
+    log_debug("LLM censor module imported successfully")
+except ImportError as e:
+    LLM_CENSOR_AVAILABLE = False
+    log_debug(f"LLM censor import failed: {e}")
+
+# Global cache for SAM model to avoid reloading for each image
+_SAM_MODEL_CACHE = {
+    'model': None,
+    'mask_generator': None,
+    'model_type': None,
+    'device': None,
+    'checkpoint_path': None,
+    'generator_params': None  # Generator parameters for caching
+}
 
 # Try to import rembg
 try:
@@ -588,14 +608,298 @@ def remove_background_rembg_gpu(image_path, output_path=None):
         log_debug(f"Successfully processed image with GPU: {result.size}")
         return result
     except Exception as e:
-        error_msg = f"Error removing background with rembg GPU: {e}"
+        error_str = str(e).lower()
+        error_code = getattr(e, 'winerror', None) or getattr(e, 'errno', None)
+        
+        # Check for access violation or critical errors
+        is_critical = (
+            'access violation' in error_str or
+            '0xc0000005' in error_str or
+            'status_access_violation' in error_str or
+            error_code == 3221226505 or
+            'cuda' in error_str and ('error' in error_str or 'failed' in error_str)
+        )
+        
+        if is_critical:
+            error_msg = (
+                f"Critical error removing background with rembg GPU: {e}\n\n"
+                "This is likely a GPU/CUDA driver issue.\n\n"
+                "Possible causes:\n"
+                "  • Outdated or corrupted NVIDIA drivers\n"
+                "  • CUDA Toolkit not properly installed\n"
+                "  • Missing or incompatible CuDNN libraries\n"
+                "  • Library conflicts (onnxruntime vs onnxruntime-gpu)\n"
+                "  • Insufficient GPU memory\n\n"
+                "Solutions:\n"
+                "  1. Try using rembg_cpu method instead\n"
+                "  2. Update NVIDIA drivers to latest version\n"
+                "  3. Reinstall onnxruntime-gpu: pip uninstall onnxruntime onnxruntime-gpu && pip install onnxruntime-gpu\n"
+                "  4. Verify CUDA installation: nvidia-smi\n"
+                "  5. Restart the application\n"
+            )
+        else:
+            error_msg = f"Error removing background with rembg GPU: {e}"
+        
         log_error(error_msg, sys.exc_info())
         raise Exception(error_msg)
 
 
-def remove_background_sam(image_path, output_path=None, model_type='vit_h', checkpoint_path=None, device='cpu'):
-    """Remove background using SAM (Segment Anything Model)."""
-    log_debug(f"Starting SAM processing: {image_path} (device: {device})")
+def get_cached_sam_model(model_type='vit_h', checkpoint_path=None, device='cpu', generator_params=None):
+    """
+    Get cached SAM model or load a new one if needed.
+    This significantly speeds up processing multiple images.
+    
+    Args:
+        model_type: SAM model type ('vit_h', 'vit_l', 'vit_b')
+        checkpoint_path: Path to checkpoint (None = auto-download)
+        device: Device ('cpu' or 'cuda')
+        generator_params: Parameters for SamAutomaticMaskGenerator (None = default values)
+    """
+    global _SAM_MODEL_CACHE
+    
+    # Default generator parameters
+    if generator_params is None:
+        generator_params = {
+            'points_per_side': 32,
+            'pred_iou_thresh': 0.88,
+            'stability_score_thresh': 0.95,
+            'min_mask_region_area': 100,
+            'crop_n_layers': 1,
+            'crop_n_points_downscale_factor': 2,
+            'box_nms_thresh': 0.7,
+        }
+    
+    # Check if we have a cached model with the same parameters
+    # Note: if checkpoint_path is None, we only compare model_type and device
+    # because the actual path is computed inside this function
+    cache_match = (
+        _SAM_MODEL_CACHE['model'] is not None and
+        _SAM_MODEL_CACHE['model_type'] == model_type and
+        _SAM_MODEL_CACHE['device'] == device and
+        _SAM_MODEL_CACHE['generator_params'] == generator_params
+    )
+    
+    # If explicit checkpoint_path provided, also verify it matches
+    if cache_match and checkpoint_path is not None:
+        cache_match = _SAM_MODEL_CACHE['checkpoint_path'] == str(checkpoint_path)
+    
+    if cache_match:
+        log_debug(f"Using cached SAM model (type: {model_type}, device: {device})")
+        return _SAM_MODEL_CACHE['model'], _SAM_MODEL_CACHE['mask_generator']
+    
+    log_debug(f"Loading new SAM model (type: {model_type}, device: {device})")
+    
+    # Default checkpoint paths
+    if checkpoint_path is None:
+        project_checkpoints = PROJECT_ROOT / ".sam_checkpoints"
+        project_checkpoints.mkdir(exist_ok=True)
+        
+        home_dir = os.path.expanduser("~")
+        sam_dir = os.path.join(home_dir, ".sam_checkpoints")
+        
+        checkpoint_urls = {
+            'vit_h': 'https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth',
+            'vit_l': 'https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth',
+            'vit_b': 'https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth'
+        }
+        
+        checkpoint_filename = f"sam_{model_type}.pth"
+        checkpoint_path = project_checkpoints / checkpoint_filename
+        if not checkpoint_path.exists():
+            checkpoint_path = Path(sam_dir) / checkpoint_filename
+            os.makedirs(sam_dir, exist_ok=True)
+        
+        log_debug(f"SAM checkpoints directory: {checkpoint_path.parent}")
+        log_debug(f"Checkpoint path: {checkpoint_path}")
+        
+        # Download checkpoint if not exists or corrupted
+        if checkpoint_path.exists():
+            # Check if file is corrupted by trying to load it
+            try:
+                import torch
+                torch.load(str(checkpoint_path), map_location='cpu', weights_only=True)
+                log_debug("Checkpoint file exists and is valid")
+            except Exception as e:
+                log_debug(f"Checkpoint appears corrupted. Re-downloading...")
+                checkpoint_path.unlink()
+        
+        if not checkpoint_path.exists():
+            log_debug(f"Checkpoint not found, downloading {model_type}...")
+            print(f"Downloading SAM checkpoint {model_type}...")
+            print("This may take a while. Please wait...")
+            try:
+                import urllib.request
+                checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                urllib.request.urlretrieve(checkpoint_urls[model_type], str(checkpoint_path))
+                log_debug("Checkpoint downloaded successfully")
+                print("Download complete!")
+            except Exception as e:
+                error_msg = f"Failed to download SAM checkpoint: {e}\n\nCheck your internet connection and try again."
+                log_error(error_msg, sys.exc_info())
+                raise Exception(error_msg)
+    
+    log_debug(f"Loading SAM model {model_type} from {checkpoint_path}...")
+    try:
+        from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
+        if isinstance(sam_model_registry, dict):
+            model_class = sam_model_registry.get(model_type)
+        elif hasattr(sam_model_registry, 'get'):
+            model_class = sam_model_registry.get(model_type)
+        elif hasattr(sam_model_registry, model_type):
+            model_class = getattr(sam_model_registry, model_type)
+        else:
+            raise ValueError(f"Cannot access SAM model registry. Registry type: {type(sam_model_registry)}")
+        
+        if model_class is None:
+            raise ValueError(f"Unknown SAM model type: {model_type}. Use 'vit_h', 'vit_l', or 'vit_b'")
+        
+        sam = model_class(checkpoint=str(checkpoint_path))
+    except KeyError:
+        raise ValueError(f"Unknown SAM model type: {model_type}. Use 'vit_h', 'vit_l', or 'vit_b'")
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"SAM checkpoint file not found: {checkpoint_path}\n\n"
+            "The checkpoint file should be downloaded automatically.\n"
+            "If download failed, check your internet connection and try again."
+        )
+    except Exception as e:
+        error_details = str(e)
+        if "checkpoint" in error_details.lower() or "file" in error_details.lower():
+            raise Exception(
+                f"Failed to load SAM checkpoint: {e}\n\n"
+                f"Checkpoint path: {checkpoint_path}\n"
+                "The checkpoint file might be corrupted. Try deleting it and running again to re-download."
+            )
+        else:
+            raise Exception(
+                f"Failed to load SAM model: {e}\n\n"
+                "This might indicate:\n"
+                "• SAM libraries are not properly installed\n"
+                "• Model checkpoint is corrupted\n"
+                "• Incompatible version of segment-anything\n\n"
+                "Try: pip install --upgrade segment-anything torch torchvision"
+            )
+    
+    log_debug("Model loaded, moving to device...")
+    try:
+        sam.to(device=device)
+    except Exception as e:
+        raise Exception(
+            f"Failed to move SAM model to device ({device}): {e}\n\n"
+            "This might be due to:\n"
+            "• Insufficient GPU memory (try using CPU instead)\n"
+            "• CUDA/GPU driver issues\n"
+            "• PyTorch installation problems"
+        )
+    log_debug("Model ready")
+    
+    log_debug("Creating mask generator...")
+    try:
+        # Create generator with specified parameters
+        mask_generator = SamAutomaticMaskGenerator(sam, **generator_params)
+        log_debug(f"Mask generator created with params: {generator_params}")
+    except Exception as e:
+        raise Exception(
+            f"Failed to create mask generator: {e}\n\n"
+            "This might indicate:\n"
+            "• SAM model is not properly initialized\n"
+            "• Incompatible version of segment-anything\n"
+            "• Invalid generator parameters\n\n"
+            "Try: pip install --upgrade segment-anything"
+        )
+    
+    # Cache the model for future use
+    _SAM_MODEL_CACHE['model'] = sam
+    _SAM_MODEL_CACHE['mask_generator'] = mask_generator
+    _SAM_MODEL_CACHE['model_type'] = model_type
+    _SAM_MODEL_CACHE['device'] = device
+    _SAM_MODEL_CACHE['checkpoint_path'] = str(checkpoint_path)
+    _SAM_MODEL_CACHE['generator_params'] = generator_params
+    
+    log_debug(f"SAM model cached (type: {model_type}, device: {device}, params: {generator_params})")
+    
+    return sam, mask_generator
+
+
+def clear_sam_cache():
+    """Clear the SAM model cache to free memory."""
+    global _SAM_MODEL_CACHE
+    if _SAM_MODEL_CACHE['model'] is not None:
+        log_debug("Clearing SAM model cache...")
+        _SAM_MODEL_CACHE['model'] = None
+        _SAM_MODEL_CACHE['mask_generator'] = None
+        _SAM_MODEL_CACHE['model_type'] = None
+        _SAM_MODEL_CACHE['device'] = None
+        _SAM_MODEL_CACHE['checkpoint_path'] = None
+        _SAM_MODEL_CACHE['generator_params'] = None
+        
+        # Try to free GPU memory
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                log_debug("GPU cache cleared")
+        except:
+            pass
+
+
+def get_saved_sam_params_path():
+    """Get path to saved SAM parameters file."""
+    params_dir = PROJECT_ROOT / ".sam_params"
+    params_dir.mkdir(exist_ok=True)
+    return params_dir / "successful_params.json"
+
+
+def load_saved_sam_params():
+    """Load saved successful SAM parameters from file."""
+    params_path = get_saved_sam_params_path()
+    if not params_path.exists():
+        return None
+    
+    try:
+        with open(params_path, 'r') as f:
+            data = json.load(f)
+            params = data.get('params', {})
+            log_debug(f"Loaded saved SAM parameters: {params}")
+            return params
+    except Exception as e:
+        log_debug(f"Error loading saved SAM parameters: {e}")
+        return None
+
+
+def save_sam_params(params):
+    """Save successful SAM parameters to file."""
+    params_path = get_saved_sam_params_path()
+    try:
+        data = {
+            'params': params,
+            'timestamp': str(Path(__file__).stat().st_mtime)  # Simple timestamp
+        }
+        with open(params_path, 'w') as f:
+            json.dump(data, f, indent=2)
+        log_debug(f"Saved successful SAM parameters: {params}")
+    except Exception as e:
+        log_debug(f"Error saving SAM parameters: {e}")
+
+
+def remove_background_sam(image_path, output_path=None, model_type='vit_h', checkpoint_path=None, device='cpu', llm_censor=None, max_iterations=3, save_successful_params=False):
+    """
+    Remove background using SAM (Segment Anything Model) with optional LLM censor.
+    
+    Args:
+        image_path: Path to input image
+        output_path: Path to save output (if None, creates _nobg.png suffix)
+        model_type: SAM model type ('vit_h', 'vit_l', 'vit_b')
+        checkpoint_path: Path to SAM checkpoint (None = auto-download)
+        device: Device ('cpu' or 'cuda')
+        llm_censor: LLM censor instance for quality control (None = disabled)
+        max_iterations: Maximum number of iterations for parameter tuning (default: 3)
+        save_successful_params: Whether to save successful parameters for next time (default: False)
+    
+    Returns:
+        PIL.Image: Image with background removed
+    """
+    log_debug(f"Starting SAM processing: {image_path} (device: {device}, llm_censor: {llm_censor is not None})")
     
     # Check if SAM is available and working
     sam_working, sam_error = check_sam_working()
@@ -643,10 +947,76 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
         base, ext = os.path.splitext(image_path)
         output_path = f"{base}_nobg.png"
     
+    # 1. Parallel analysis of original image by LLM (if enabled)
+    image_analysis = None
+    if llm_censor and llm_censor.enabled:
+        try:
+            log_debug("LLM censor: analyzing original image...")
+            image_analysis = llm_censor.analyze_image(image_path)
+            if image_analysis:
+                log_debug(f"LLM analysis: {image_analysis}")
+        except Exception as e:
+            log_debug(f"Error analyzing image with LLM: {e}. Continuing without LLM analysis.")
+    
+    # Initial SAM generator parameters
+    # Try to load saved successful parameters first
+    saved_params = None
+    if save_successful_params and llm_censor and llm_censor.enabled:
+        saved_params = load_saved_sam_params()
+        if saved_params:
+            log_debug(f"Using saved successful parameters as starting point: {saved_params}")
+    
+    # Use saved parameters if available, otherwise use defaults
+    default_params = {
+        'points_per_side': 32,
+        'pred_iou_thresh': 0.88,
+        'stability_score_thresh': 0.95,
+        'min_mask_region_area': 100,
+        'crop_n_layers': 1,
+        'crop_n_points_downscale_factor': 2,
+        'box_nms_thresh': 0.7,
+    }
+    
+    # Merge saved params with defaults (in case new params were added)
+    if saved_params:
+        sam_params = {**default_params, **saved_params}
+    else:
+        sam_params = default_params.copy()
+    
+    # Initialize variables before try block so they're available in except blocks
+    best_result = None
+    best_score = 0
+    all_results = []  # List of (result, score, path, iteration) tuples
+    result = None  # Last result from iteration
+    
     try:
-        log_debug(f"Loading image with OpenCV: {image_path}")
+        log_debug(f"Loading image: {image_path}")
         import cv2
-        image = cv2.imread(image_path)
+        import numpy as np
+        
+        # OpenCV imread doesn't work with Unicode paths on Windows
+        # Use alternative method: read file as bytes and decode with cv2.imdecode
+        try:
+            # Try direct path first (works for ASCII paths)
+            image = cv2.imread(image_path)
+            if image is None:
+                # If failed, try reading file as bytes (works with Unicode paths)
+                log_debug("Direct cv2.imread failed, trying byte reading method for Unicode path...")
+                with open(image_path, 'rb') as f:
+                    image_bytes = np.frombuffer(f.read(), np.uint8)
+                    image = cv2.imdecode(image_bytes, cv2.IMREAD_COLOR)
+        except Exception as e:
+            # Fallback: use PIL to load image (handles Unicode paths well)
+            log_debug(f"OpenCV loading failed ({e}), trying PIL...")
+            from PIL import Image as PILImage
+            pil_image = PILImage.open(image_path)
+            # Convert PIL image to OpenCV format (BGR)
+            image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+            if len(image.shape) == 2:  # Grayscale
+                image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            elif image.shape[2] == 4:  # RGBA
+                image = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
+        
         if image is None:
             raise ValueError(f"Could not load image: {image_path}")
         log_debug(f"Image loaded: {image.shape}")
@@ -655,190 +1025,546 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
         
         log_debug(f"Using device: {device}")
         
-        # Default checkpoint paths
-        if checkpoint_path is None:
-            project_checkpoints = PROJECT_ROOT / ".sam_checkpoints"
-            project_checkpoints.mkdir(exist_ok=True)
+        for iteration in range(max_iterations):
+            log_debug(f"Iteration {iteration + 1}/{max_iterations} with parameters: {sam_params}")
             
-            home_dir = os.path.expanduser("~")
-            sam_dir = os.path.join(home_dir, ".sam_checkpoints")
+            # Clear generator cache if parameters changed
+            if iteration > 0:
+                clear_sam_cache()
             
-            checkpoint_urls = {
-                'vit_h': 'https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth',
-                'vit_l': 'https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth',
-                'vit_b': 'https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth'
-            }
+            # Get cached SAM model (or load if not cached) with current parameters
+            sam, mask_generator = get_cached_sam_model(model_type, checkpoint_path, device, sam_params)
             
-            checkpoint_filename = f"sam_{model_type}.pth"
-            checkpoint_path = project_checkpoints / checkpoint_filename
-            if not checkpoint_path.exists():
-                checkpoint_path = Path(sam_dir) / checkpoint_filename
-                os.makedirs(sam_dir, exist_ok=True)
-            
-            log_debug(f"SAM checkpoints directory: {checkpoint_path.parent}")
-            log_debug(f"Checkpoint path: {checkpoint_path}")
-            
-            # Download checkpoint if not exists or corrupted
-            def download_checkpoint():
-                if checkpoint_path.exists():
-                    # Check if file is corrupted by trying to load it
-                    try:
-                        import torch
-                        torch.load(str(checkpoint_path), map_location='cpu')
-                        log_debug("Checkpoint file exists and is valid")
-                        return
-                    except Exception as e:
-                        log_debug(f"Checkpoint appears corrupted. Re-downloading...")
-                        checkpoint_path.unlink()
-                
-                log_debug(f"Checkpoint not found, downloading {model_type}...")
-                print(f"Downloading SAM checkpoint {model_type}...")
-                print("This may take a while. Please wait...")
-                try:
-                    import urllib.request
-                    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-                    urllib.request.urlretrieve(checkpoint_urls[model_type], str(checkpoint_path))
-                    log_debug("Checkpoint downloaded successfully")
-                    print("Download complete!")
-                except Exception as e:
-                    error_msg = f"Failed to download SAM checkpoint: {e}\n\nCheck your internet connection and try again."
-                    log_error(error_msg, sys.exc_info())
-                    raise Exception(error_msg)
-            
-            download_checkpoint()
-        
-        log_debug(f"Loading SAM model {model_type} from {checkpoint_path}...")
-        try:
-            from segment_anything import sam_model_registry
-            if isinstance(sam_model_registry, dict):
-                model_class = sam_model_registry.get(model_type)
-            elif hasattr(sam_model_registry, 'get'):
-                model_class = sam_model_registry.get(model_type)
-            elif hasattr(sam_model_registry, model_type):
-                model_class = getattr(sam_model_registry, model_type)
-            else:
-                raise ValueError(f"Cannot access SAM model registry. Registry type: {type(sam_model_registry)}")
-            
-            if model_class is None:
-                raise ValueError(f"Unknown SAM model type: {model_type}. Use 'vit_h', 'vit_l', or 'vit_b'")
-            
-            sam = model_class(checkpoint=str(checkpoint_path))
-        except KeyError:
-            raise ValueError(f"Unknown SAM model type: {model_type}. Use 'vit_h', 'vit_l', or 'vit_b'")
-        except FileNotFoundError:
-            raise FileNotFoundError(
-                f"SAM checkpoint file not found: {checkpoint_path}\n\n"
-                "The checkpoint file should be downloaded automatically.\n"
-                "If download failed, check your internet connection and try again."
-            )
-        except Exception as e:
-            error_details = str(e)
-            if "checkpoint" in error_details.lower() or "file" in error_details.lower():
-                raise Exception(
-                    f"Failed to load SAM checkpoint: {e}\n\n"
-                    f"Checkpoint path: {checkpoint_path}\n"
-                    "The checkpoint file might be corrupted. Try deleting it and running again to re-download."
-                )
-            else:
-                raise Exception(
-                    f"Failed to load SAM model: {e}\n\n"
-                    "This might indicate:\n"
-                    "• SAM libraries are not properly installed\n"
-                    "• Model checkpoint is corrupted\n"
-                    "• Incompatible version of segment-anything\n\n"
-                    "Try: pip install --upgrade segment-anything torch torchvision"
-                )
-        
-        log_debug("Model loaded, moving to device...")
-        try:
-            sam.to(device=device)
-        except Exception as e:
-            raise Exception(
-                f"Failed to move SAM model to device ({device}): {e}\n\n"
-                "This might be due to:\n"
-                "• Insufficient GPU memory (try using CPU instead)\n"
-                "• CUDA/GPU driver issues\n"
-                "• PyTorch installation problems"
-            )
-        log_debug("Model ready")
-        
-        log_debug("Creating mask generator...")
-        try:
-            mask_generator = SamAutomaticMaskGenerator(sam)
-        except Exception as e:
-            raise Exception(
-                f"Failed to create mask generator: {e}\n\n"
-                "This might indicate:\n"
-                "• SAM model is not properly initialized\n"
-                "• Incompatible version of segment-anything\n\n"
-                "Try: pip install --upgrade segment-anything"
-            )
-        
-        log_debug("Generating masks...")
-        try:
-            masks = mask_generator.generate(image_rgb)
-        except RuntimeError as e:
-            error_str = str(e)
-            if "out of memory" in error_str.lower() or "cuda" in error_str.lower():
-                raise Exception(
-                    f"GPU memory error: {e}\n\n"
-                    "Solutions:\n"
-                    "• Try a smaller image\n"
-                    "• Use CPU instead of GPU\n"
-                    "• Close other applications using GPU\n"
-                    "• Use a smaller SAM model (vit_b instead of vit_h)"
-                )
-            else:
+            log_debug("Generating masks...")
+            # Warn user if this might take a while (large images or GPU)
+            if device == 'cuda':
+                log_debug("Using GPU - this may take several minutes for large images")
+            try:
+                masks = mask_generator.generate(image_rgb)
+            except RuntimeError as e:
+                error_str = str(e)
+                if "out of memory" in error_str.lower() or "cuda" in error_str.lower():
+                    raise Exception(
+                        f"GPU memory error: {e}\n\n"
+                        "Solutions:\n"
+                        "• Try a smaller image\n"
+                        "• Use CPU instead of GPU\n"
+                        "• Close other applications using GPU\n"
+                        "• Use a smaller SAM model (vit_b instead of vit_h)"
+                    )
+                else:
+                    raise Exception(
+                        f"Failed to generate masks: {e}\n\n"
+                        "This might be due to:\n"
+                        "• Image size too large\n"
+                        "• Memory issues\n"
+                        "• SAM model problems\n\n"
+                        "Try:\n"
+                        "• Resize the image to a smaller size\n"
+                        "• Use a different background removal method (rembg CPU)"
+                    )
+            except Exception as e:
                 raise Exception(
                     f"Failed to generate masks: {e}\n\n"
                     "This might be due to:\n"
-                    "• Image size too large\n"
-                    "• Memory issues\n"
-                    "• SAM model problems\n\n"
+                    "• Image size or memory issues\n"
+                    "• SAM model problems\n"
+                    "• Image format issues\n\n"
                     "Try:\n"
-                    "• Resize the image to a smaller size\n"
-                    "• Use a different background removal method (rembg CPU)"
+                    "• Use a smaller image\n"
+                    "• Use rembg CPU instead (more reliable)"
                 )
-        except Exception as e:
-            raise Exception(
-                f"Failed to generate masks: {e}\n\n"
-                "This might be due to:\n"
-                "• Image size or memory issues\n"
-                "• SAM model problems\n"
-                "• Image format issues\n\n"
-                "Try:\n"
-                "• Use a smaller image\n"
-                "• Use rembg CPU instead (more reliable)"
-            )
+            
+            log_debug(f"Generated {len(masks)} masks")
+            
+            if not masks:
+                raise ValueError("No masks generated. Try a different image or check image quality.")
+            
+            # Sort masks by predicted_iou (highest first) and then by area (largest first)
+            # This prioritizes masks with higher confidence over just size
+            sorted_masks = sorted(masks, key=lambda x: (x.get('predicted_iou', 0), x.get('stability_score', 0), x['area']), reverse=True)
+            
+            # Also try smallest masks (in case object is small and background is large)
+            sorted_by_area_asc = sorted(masks, key=lambda x: x['area'])
+            smallest_masks = sorted_by_area_asc[:min(3, len(sorted_by_area_asc))]
+            
+            # Combine top masks with smallest masks (remove duplicates)
+            # Use id() to compare mask objects instead of comparing dictionaries with NumPy arrays
+            candidate_masks = sorted_masks[:min(6, len(sorted_masks))]
+            candidate_mask_ids = {id(m) for m in candidate_masks}
+            for small_mask in smallest_masks:
+                if id(small_mask) not in candidate_mask_ids:
+                    candidate_masks.append(small_mask)
+                    candidate_mask_ids.add(id(small_mask))
+            
+            # Limit to reasonable number
+            num_candidates = min(8, len(candidate_masks))
+            candidate_masks = candidate_masks[:num_candidates]
+            
+            selected_mask_idx = 0  # Default to first (largest/highest iou)
+            result = None
+            temp_output = None
+            
+            # If LLM censor is enabled, let it choose the best mask from candidates
+            if llm_censor and llm_censor.enabled and len(candidate_masks) > 1:
+                log_debug(f"LLM censor: evaluating {len(candidate_masks)} mask candidates...")
+                
+                # Create temporary results for each candidate
+                candidate_results = []
+                image_pil = Image.fromarray(image_rgb).convert("RGBA")
+                
+                for idx, candidate_mask in enumerate(candidate_masks):
+                    mask = candidate_mask['segmentation']
+                    
+                    # Add normal mask
+                    mask_array = (mask * 255).astype(np.uint8)
+                    image_array = np.array(image_pil.copy())
+                    image_array[:, :, 3] = mask_array
+                    result_img = Image.fromarray(image_array, 'RGBA')
+                    temp_candidate_path = f"{output_path}.candidate_{iteration}_{idx}.png"
+                    result_img.save(temp_candidate_path, "PNG")
+                    
+                    candidate_results.append({
+                        'mask_index': idx,
+                        'result_path': temp_candidate_path,
+                        'area': candidate_mask['area'],
+                        'predicted_iou': candidate_mask.get('predicted_iou', 0),
+                        'stability_score': candidate_mask.get('stability_score', 0),
+                        'is_inverted': False
+                    })
+                    
+                    # Also add inverted mask as candidate (in case object is smaller than background)
+                    # Ensure mask is boolean before inverting
+                    if mask.dtype != bool:
+                        mask_bool = mask.astype(bool)
+                    else:
+                        mask_bool = mask
+                    inverted_mask = ~mask_bool
+                    mask_array_inv = (inverted_mask.astype(np.uint8) * 255).astype(np.uint8)
+                    image_array_inv = np.array(image_pil.copy())
+                    image_array_inv[:, :, 3] = mask_array_inv
+                    result_img_inv = Image.fromarray(image_array_inv, 'RGBA')
+                    temp_candidate_path_inv = f"{output_path}.candidate_{iteration}_{idx}_inv.png"
+                    result_img_inv.save(temp_candidate_path_inv, "PNG")
+                    
+                    candidate_results.append({
+                        'mask_index': idx,
+                        'result_path': temp_candidate_path_inv,
+                        'area': image_rgb.shape[0] * image_rgb.shape[1] - candidate_mask['area'],  # Inverted area
+                        'predicted_iou': candidate_mask.get('predicted_iou', 0),
+                        'stability_score': candidate_mask.get('stability_score', 0),
+                        'is_inverted': True
+                    })
+                
+                # Let LLM choose the best mask
+                # Note: Timeout is handled inside llm_censor (requests timeout=300)
+                # If LLM hangs, it will raise an exception which we catch
+                try:
+                    best_idx = llm_censor.select_best_mask(image_path, candidate_results)
+                except Exception as e:
+                    log_error(f"LLM mask selection failed or timed out: {e}. Using first candidate.")
+                    best_idx = 0  # Fallback to first candidate
+                if best_idx is not None and 0 <= best_idx < len(candidate_results):
+                    selected_result = candidate_results[best_idx]
+                    selected_mask_idx = selected_result['mask_index']
+                    is_inverted = selected_result.get('is_inverted', False)
+                    
+                    log_debug(f"LLM selected mask candidate {selected_mask_idx} (inverted: {is_inverted}, area: {selected_result['area']}, iou: {selected_result['predicted_iou']})")
+                    
+                    # Use the selected result file directly
+                    result = Image.open(selected_result['result_path']).convert('RGBA')
+                    temp_output = selected_result['result_path']
+                    
+                    # Get the mask for potential later use
+                    if is_inverted:
+                        orig_mask = candidate_masks[selected_mask_idx]['segmentation']
+                        # Ensure mask is boolean before inverting
+                        if orig_mask.dtype != bool:
+                            mask_bool = orig_mask.astype(bool)
+                        else:
+                            mask_bool = orig_mask
+                        mask = ~mask_bool
+                    else:
+                        mask = candidate_masks[selected_mask_idx]['segmentation']
+                else:
+                    log_debug("LLM mask selection failed, using first candidate")
+                    selected_mask = candidate_masks[0]
+                    mask = selected_mask['segmentation']
+                    mask_array = (mask * 255).astype(np.uint8)
+                    image_array = np.array(image_pil)
+                    image_array[:, :, 3] = mask_array
+                    result = Image.fromarray(image_array, 'RGBA')
+                    temp_output = candidate_results[0]['result_path']
+                
+                # Clean up other candidate files (but keep the selected one)
+                for idx, candidate_result in enumerate(candidate_results):
+                    if idx != best_idx:
+                        try:
+                            os.remove(candidate_result['result_path'])
+                        except:
+                            pass
+                
+                # Save to standard temp name for evaluation
+                # IMPORTANT: Save best result before any cleanup
+                final_temp = output_path if iteration == max_iterations - 1 else f"{output_path}.temp_{iteration}.png"
+                if temp_output != final_temp:
+                    # Save result to final temp location
+                    result.save(final_temp, "PNG")
+                    # Only remove old temp if it's different from the selected candidate
+                    if temp_output != selected_result['result_path']:
+                        try:
+                            os.remove(temp_output)
+                        except:
+                            pass
+                    temp_output = final_temp
+                else:
+                    # If temp_output is already the final temp, make sure it's saved
+                    result.save(final_temp, "PNG")
+            else:
+                # No LLM censor or only one candidate - use largest/highest iou
+                selected_mask = candidate_masks[0]
+                mask = selected_mask['segmentation']
+                log_debug(f"Using mask with area: {selected_mask['area']}, predicted_iou: {selected_mask.get('predicted_iou', 0)}")
+                
+                log_debug("Creating RGBA image...")
+                image_pil = Image.fromarray(image_rgb).convert("RGBA")
+                mask_array = (mask * 255).astype(np.uint8)
+                
+                # Apply mask to alpha channel
+                image_array = np.array(image_pil)
+                image_array[:, :, 3] = mask_array
+                
+                result = Image.fromarray(image_array, 'RGBA')
+                
+                # Save temporary result for evaluation
+                temp_output = output_path if iteration == max_iterations - 1 else f"{output_path}.temp_{iteration}.png"
+                result.save(temp_output, "PNG")
+            
+            # 2. Check result with LLM censor
+            if llm_censor and llm_censor.enabled:
+                try:
+                    log_debug(f"LLM censor: evaluating result of iteration {iteration + 1}...")
+                    print(f"[SAM] LLM evaluation iteration {iteration + 1} (timeout: 5 min, can interrupt with Ctrl+C)...", file=sys.stderr)
+                    # Note: Timeout is handled inside llm_censor (requests timeout=300 = 5 minutes)
+                    # If LLM hangs, it will raise an exception which we catch
+                    try:
+                        evaluation = llm_censor.evaluate_segmentation(image_path, temp_output)
+                        print(f"[SAM] LLM evaluation completed", file=sys.stderr)
+                    except Exception as e:
+                        log_error(f"LLM evaluation failed or timed out: {e}. Using current result without LLM approval.")
+                        print(f"[WARNING] LLM evaluation failed/timed out: {e}. Continuing without LLM approval.", file=sys.stderr)
+                        # Continue without LLM approval - use current result
+                        evaluation = {'approved': False, 'quality_score': 5, 'wrong_selection': False}
+                    
+                    quality_score = evaluation.get('quality_score', 5)
+                    approved = evaluation.get('approved', False)
+                    wrong_selection = evaluation.get('wrong_selection', False)
+                    
+                    log_debug(f"LLM evaluation: approved={approved}, score={quality_score}, wrong_selection={wrong_selection}, issues={evaluation.get('issues', [])}")
+                    
+                    # If wrong selection detected (background kept instead of object), try inverting the mask
+                    if wrong_selection:
+                        log_debug("LLM detected wrong selection (background kept instead of object), trying inverted mask...")
+                        
+                        # Try inverted mask
+                        # Ensure mask is boolean before inverting
+                        if mask.dtype != bool:
+                            mask_bool = mask.astype(bool)
+                        else:
+                            mask_bool = mask
+                        inverted_mask = ~mask_bool
+                        mask_array_inv = (inverted_mask.astype(np.uint8) * 255).astype(np.uint8)
+                        
+                        image_pil_inv = Image.fromarray(image_rgb).convert("RGBA")
+                        image_array_inv = np.array(image_pil_inv)
+                        image_array_inv[:, :, 3] = mask_array_inv
+                        
+                        result_inv = Image.fromarray(image_array_inv, 'RGBA')
+                        temp_output_inv = f"{output_path}.inverted_{iteration}.png"
+                        result_inv.save(temp_output_inv, "PNG")
+                        
+                        # Re-evaluate inverted result
+                        try:
+                            evaluation_inv = llm_censor.evaluate_segmentation(image_path, temp_output_inv)
+                            approved_inv = evaluation_inv.get('approved', False)
+                            wrong_selection_inv = evaluation_inv.get('wrong_selection', False)
+                            quality_score_inv = evaluation_inv.get('quality_score', 0)
+                            
+                            log_debug(f"Inverted mask evaluation: approved={approved_inv}, wrong_selection={wrong_selection_inv}, score={quality_score_inv}")
+                            
+                            # If inverted mask is better, use it
+                            if not wrong_selection_inv and quality_score_inv > quality_score:
+                                log_debug("Inverted mask is better, using it")
+                                result = result_inv
+                                temp_output = temp_output_inv
+                                approved = approved_inv
+                                quality_score = quality_score_inv
+                                wrong_selection = False
+                                
+                                # Update best result tracking
+                                if quality_score > best_score:
+                                    best_score = quality_score
+                                    best_result = result.copy()
+                                    # Save to numbered file for comparison
+                                    result_path_with_score = f"{output_path}.score_{quality_score:.1f}_iter{iteration}_inv.png"
+                                    best_result.save(result_path_with_score, "PNG")
+                                    all_results.append((best_result.copy(), quality_score, result_path_with_score, iteration))
+                                    log_debug(f"New best result (inverted, score: {quality_score})")
+                            else:
+                                # Inverted mask is also wrong, reject both
+                                log_debug("Inverted mask is also wrong, rejecting")
+                                try:
+                                    os.remove(temp_output_inv)
+                                except:
+                                    pass
+                                approved = False
+                                quality_score = 0
+                        except Exception as e:
+                            log_debug(f"Error evaluating inverted mask: {e}")
+                            approved = False
+                            quality_score = 0
+                        
+                        if not approved:
+                            log_debug("Both original and inverted masks rejected")
+                    
+                    # Save all results (not just "best") for final comparison
+                    # IMPORTANT: Don't overwrite output_path until we know which is truly best
+                    if not wrong_selection:
+                        # Save this result to a numbered file for comparison
+                        result_path_with_score = f"{output_path}.score_{quality_score:.1f}_iter{iteration}.png"
+                        result.save(result_path_with_score, "PNG")
+                        all_results.append((result.copy(), quality_score, result_path_with_score, iteration))
+                        log_debug(f"Saved result with score {quality_score} to {result_path_with_score}")
+                        
+                        # Update best result tracking (but don't overwrite final output yet)
+                        if quality_score > best_score:
+                            best_score = quality_score
+                            best_result = result.copy()
+                            log_debug(f"New best result so far (score: {quality_score})")
+                    
+                    # If result is approved, we can use it, but still compare with all results at the end
+                    if approved and not wrong_selection:
+                        log_debug(f"LLM censor approved result at iteration {iteration + 1}")
+                        
+                        # Save successful parameters if enabled
+                        if save_successful_params:
+                            save_sam_params(sam_params)
+                        
+                        # Don't return immediately - continue to compare with all results
+                        # But mark this as approved for final selection
+                        log_debug(f"Result approved, but will compare with all results at the end")
+                    
+                    # If not last iteration, adjust parameters
+                    if iteration < max_iterations - 1:
+                        # If wrong selection detected, make more aggressive parameter changes
+                        if wrong_selection:
+                            log_debug("Wrong selection detected, making aggressive parameter adjustments")
+                            # Try different approach - increase points, adjust thresholds
+                            sam_params = {
+                                'points_per_side': min(64, sam_params.get('points_per_side', 32) + 8),
+                                'pred_iou_thresh': max(0.5, sam_params.get('pred_iou_thresh', 0.88) - 0.1),
+                                'stability_score_thresh': max(0.5, sam_params.get('stability_score_thresh', 0.95) - 0.05),
+                                'min_mask_region_area': max(0, sam_params.get('min_mask_region_area', 100) - 50),
+                                'crop_n_layers': min(3, sam_params.get('crop_n_layers', 1) + 1),
+                                'crop_n_points_downscale_factor': max(1, sam_params.get('crop_n_points_downscale_factor', 2) - 1),
+                                'box_nms_thresh': max(0.1, sam_params.get('box_nms_thresh', 0.7) - 0.1),
+                            }
+                            log_debug(f"Aggressive parameter adjustment: {sam_params}")
+                        else:
+                            new_params = llm_censor.suggest_sam_parameters(evaluation, sam_params)
+                            if new_params:
+                                log_debug(f"LLM suggested new parameters: {new_params}")
+                                sam_params = new_params
+                        
+                        # Don't delete temp file if it's already saved in all_results
+                        # Keep all results for final comparison
+                        saved_paths = {path for _, _, path, _ in all_results}
+                        try:
+                            if temp_output != output_path and temp_output not in saved_paths:
+                                # This temp file is not in our saved results, safe to delete
+                                if os.path.exists(temp_output):
+                                    os.remove(temp_output)
+                                    log_debug(f"Removed unused temp file: {temp_output}")
+                        except:
+                            pass
+                        continue
+                    
+                except Exception as e:
+                    log_error(f"Error evaluating with LLM: {e}. Saving current result for comparison.")
+                    # In case of LLM error, save result for comparison but continue
+                    if result is not None:
+                        # Save to all_results for final comparison
+                        result_path_with_error = f"{output_path}.error_iter{iteration}.png"
+                        result.save(result_path_with_error, "PNG")
+                        all_results.append((result.copy(), 4.0, result_path_with_error, iteration))  # Lower score for error case
+                        log_debug(f"Saved result from error case (score: 4.0) to {result_path_with_error}")
+                        # Don't return - continue to compare with all results at the end
+                    # If result is None, we need to create it from the last mask
+                    log_debug("Result is None, creating from last processed mask")
+                    if masks:
+                        # Use the best mask we have
+                        best_mask = sorted_masks[0]
+                        mask = best_mask['segmentation']
+                        image_pil = Image.fromarray(image_rgb).convert("RGBA")
+                        mask_array = (mask * 255).astype(np.uint8)
+                        image_array = np.array(image_pil)
+                        image_array[:, :, 3] = mask_array
+                        result = Image.fromarray(image_array, 'RGBA')
+                        result.save(output_path, "PNG")
+                        return result
+                    else:
+                        raise ValueError("No masks generated and LLM evaluation failed")
+            else:
+                # LLM censor disabled - save result and return immediately after first iteration
+                # Without LLM, we don't need multiple iterations
+                log_debug(f"LLM censor disabled - using result from iteration {iteration + 1}")
+                print(f"[SAM] LLM censor disabled - using result from iteration {iteration + 1}", file=sys.stderr)
+                
+                # Save result to final output
+                result.save(output_path, "PNG")
+                log_debug(f"Saved result to {output_path}")
+                print(f"[SAM] Saved result to {os.path.basename(output_path)}", file=sys.stderr)
+                return result
         
-        log_debug(f"Generated {len(masks)} masks")
+        # If reached end of iterations, compare ALL results and choose the truly best one
+        # IMPORTANT: Compare all saved results, not just the last "best" one
+        # Also check for any saved result files in case process was interrupted
+        if not all_results:
+            log_debug("No results in all_results, checking for saved result files...")
+            import glob
+            import re
+            base_path = str(output_path)
+            # Look for files with score pattern: *.score_*.png
+            saved_files = glob.glob(f"{base_path}.score_*.png")
+            if saved_files:
+                log_debug(f"Found {len(saved_files)} saved result files, loading them...")
+                for saved_file in saved_files:
+                    try:
+                        # Extract score from filename
+                        match = re.search(r'score_([\d.]+)_iter(\d+)', saved_file)
+                        if match:
+                            score = float(match.group(1))
+                            iter_num = int(match.group(2))
+                            saved_result = Image.open(saved_file).convert("RGBA")
+                            all_results.append((saved_result, score, saved_file, iter_num))
+                            log_debug(f"Loaded saved result: score={score}, iteration={iter_num}, file={os.path.basename(saved_file)}")
+                    except Exception as e:
+                        log_debug(f"Error loading saved file {saved_file}: {e}")
         
-        # Find the largest mask (usually the main subject)
-        if not masks:
-            raise ValueError("No masks generated. Try a different image or check image quality.")
+        if all_results:
+            # Sort all results by score (highest first)
+            all_results.sort(key=lambda x: x[1], reverse=True)
+            best_final_result, best_final_score, best_final_path, best_final_iter = all_results[0]
+            
+            log_debug(f"Comparing {len(all_results)} results:")
+            for idx, (res, score, path, iter_num) in enumerate(all_results[:5]):  # Show top 5
+                log_debug(f"  [{idx+1}] Score: {score:.1f}, Iteration: {iter_num}, Path: {os.path.basename(path)}")
+            
+            # Save the truly best result to final output
+            best_final_result.save(output_path, "PNG")
+            log_debug(f"Selected best result (score: {best_final_score:.1f}, iteration: {best_final_iter}) as final output")
+            
+            # Keep the best result file, but optionally clean up others
+            # Don't delete immediately - user might want to compare
+            log_debug(f"All results saved with scores. Best: {os.path.basename(best_final_path)}")
+            log_debug(f"Other results available for comparison: {len(all_results)-1} files")
+            
+            # Print summary to console for user
+            print(f"\n[INFO] Processed {len(all_results)} result(s). Best score: {best_final_score:.1f}")
+            if len(all_results) > 1:
+                print(f"[INFO] All results saved with scores in filename. You can compare them manually.")
+                print(f"[INFO] Best result saved to: {os.path.basename(output_path)}")
+                print(f"[INFO] Other results: {', '.join([os.path.basename(path) for _, _, path, _ in all_results[1:5]])}")
+            
+            return best_final_result
+        elif best_result is not None:
+            # Fallback: use tracked best result
+            best_result.save(output_path, "PNG")
+            log_debug(f"Saved tracked best result (score: {best_score}) to {output_path}")
+            return best_result
+        else:
+            # No results in all_results, use last result
+            if result is not None:
+                log_debug(f"Saving final result to: {output_path}")
+                result.save(output_path, "PNG")
+                log_debug(f"Successfully processed image with SAM: {result.size}")
+                return result
+            else:
+                # Last resort: try to find any saved temp file
+                log_debug("No result available, checking for temp files...")
+                for i in range(max_iterations):
+                    temp_file = f"{output_path}.temp_{i}.png"
+                    if os.path.exists(temp_file):
+                        log_debug(f"Found temp file: {temp_file}, using it as result")
+                        result = Image.open(temp_file).convert("RGBA")
+                        result.save(output_path, "PNG")
+                        return result
+                raise ValueError("No result generated and no temp files found")
         
-        largest_mask = max(masks, key=lambda x: x['area'])
-        mask = largest_mask['segmentation']
-        log_debug(f"Using largest mask with area: {largest_mask['area']}")
+    except KeyboardInterrupt:
+        # User interrupted - try to save best result if available
+        log_error("Processing interrupted by user")
+        print(f"[SAM] Process interrupted. Looking for saved results...", file=sys.stderr)
         
-        log_debug("Creating RGBA image...")
-        image_pil = Image.fromarray(image_rgb).convert("RGBA")
-        mask_array = (mask * 255).astype(np.uint8)
+        # First, try to load any saved result files
+        if not all_results:
+            import glob
+            import re
+            base_path = str(output_path)
+            saved_files = glob.glob(f"{base_path}.score_*.png")
+            if saved_files:
+                log_debug(f"Found {len(saved_files)} saved result files after interruption")
+                for saved_file in saved_files:
+                    try:
+                        match = re.search(r'score_([\d.]+)_iter(\d+)', saved_file)
+                        if match:
+                            score = float(match.group(1))
+                            iter_num = int(match.group(2))
+                            saved_result = Image.open(saved_file).convert("RGBA")
+                            all_results.append((saved_result, score, saved_file, iter_num))
+                    except Exception as e:
+                        log_debug(f"Error loading saved file {saved_file}: {e}")
         
-        # Apply mask to alpha channel
-        image_array = np.array(image_pil)
-        image_array[:, :, 3] = mask_array
+        # Use best from all_results if available
+        if all_results:
+            all_results.sort(key=lambda x: x[1], reverse=True)
+            best_final_result, best_final_score, best_final_path, _ = all_results[0]
+            best_final_result.save(output_path, "PNG")
+            print(f"[SAM] Saved best available result (score: {best_final_score:.1f}) to {os.path.basename(output_path)}", file=sys.stderr)
+            log_debug(f"Saved best available result (score: {best_final_score:.1f}) from interruption")
+            return best_final_result
         
-        result = Image.fromarray(image_array, 'RGBA')
-        log_debug(f"Saving result to: {output_path}")
-        result.save(output_path, "PNG")
-        log_debug(f"Successfully processed image with SAM: {result.size}")
-        
-        return result
-        
+        # Fallback to best_result
+        if best_result is not None and os.path.exists(output_path):
+            log_debug(f"Best result already saved to {output_path}")
+            return best_result
+        elif best_result is not None:
+            best_result.save(output_path, "PNG")
+            log_debug(f"Saved best result to {output_path} before interruption")
+            return best_result
+        else:
+            # Try to find any temp file
+            for i in range(max_iterations):
+                temp_file = f"{output_path}.temp_{i}.png"
+                if os.path.exists(temp_file):
+                    result = Image.open(temp_file).convert("RGBA")
+                    result.save(output_path, "PNG")
+                    log_debug(f"Saved temp file {temp_file} to {output_path} before interruption")
+                    return result
+            raise KeyboardInterrupt("Processing interrupted and no results to save")
     except Exception as e:
         error_msg = f"Error removing background with SAM: {e}"
         log_error(error_msg, sys.exc_info())
+        
+        # Try to save best result even on error
+        if best_result is not None:
+            try:
+                if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                    best_result.save(output_path, "PNG")
+                    log_debug(f"Saved best result to {output_path} despite error")
+            except:
+                pass
+        
         raise Exception(error_msg)
 
 
@@ -851,7 +1577,7 @@ def normalize_method_name(method):
     return legacy_map.get(method, method)
 
 
-def remove_background(image_path, output_path=None, method='rembg_cpu'):
+def remove_background(image_path, output_path=None, method='rembg_cpu', llm_censor=None, llm_max_iterations=3, save_successful_params=False):
     """
     Unified function to remove background using specified method.
     
@@ -859,12 +1585,15 @@ def remove_background(image_path, output_path=None, method='rembg_cpu'):
         image_path (str): Path to input image
         output_path (str): Path to save output (if None, creates _nobg.png suffix)
         method (str): Method to use ('rembg_cpu', 'rembg_gpu', 'sam_cpu', 'sam_gpu')
+        llm_censor: LLM censor instance (only used for SAM methods)
+        llm_max_iterations: Maximum iterations for LLM parameter tuning (default: 3)
+        save_successful_params: Whether to save successful parameters for next time (default: False)
     
     Returns:
         PIL.Image: Image with background removed, or None on error
     """
     method = normalize_method_name(method)
-    log_debug(f"remove_background called with method: {method}, image: {image_path}")
+    log_debug(f"remove_background called with method: {method}, image: {image_path}, llm_censor: {llm_censor is not None}")
     
     try:
         if method == 'rembg_cpu':
@@ -872,9 +1601,9 @@ def remove_background(image_path, output_path=None, method='rembg_cpu'):
         elif method == 'rembg_gpu':
             return remove_background_rembg_gpu(image_path, output_path)
         elif method == 'sam_cpu':
-            return remove_background_sam(image_path, output_path, device='cpu')
+            return remove_background_sam(image_path, output_path, device='cpu', llm_censor=llm_censor, max_iterations=llm_max_iterations, save_successful_params=save_successful_params)
         elif method == 'sam_gpu':
-            return remove_background_sam(image_path, output_path, device='cuda')
+            return remove_background_sam(image_path, output_path, device='cuda', llm_censor=llm_censor, max_iterations=llm_max_iterations, save_successful_params=save_successful_params)
         else:
             error_msg = f"Unknown method: {method}. Choose from: rembg_cpu, rembg_gpu, sam_cpu, sam_gpu"
             log_error(error_msg)
