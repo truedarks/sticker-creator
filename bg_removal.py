@@ -21,18 +21,55 @@ from PIL import Image
 import numpy as np
 import subprocess
 import json
+from datetime import datetime
 
-# Enable verbose logging
+# Enable verbose logging to stderr via env var
 DEBUG = os.environ.get('STICKER_DEBUG', '0') == '1'
 
+# Application-level logging to file, controlled by app settings
+APP_CONFIG_DIR = PROJECT_ROOT / ".config"
+APP_CONFIG_DIR.mkdir(exist_ok=True)
+APP_CONFIG_PATH = APP_CONFIG_DIR / "app_config.json"
+LOG_FILE_PATH = APP_CONFIG_DIR / "sticker_creator.log"
+
+def _load_log_to_file_flag():
+    """Load 'save_logs' flag from general app settings file."""
+    try:
+        if APP_CONFIG_PATH.exists():
+            with open(APP_CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return bool(data.get("save_logs", False))
+    except Exception:
+        # Fail silently – logging to file is optional
+        pass
+    return False
+
+LOG_TO_FILE = _load_log_to_file_flag()
+
+def _write_log_line(prefix, message):
+    """Write single log line to file if enabled."""
+    if not LOG_TO_FILE:
+        return
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(LOG_FILE_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {prefix} {message}\n")
+    except Exception:
+        # Do not break processing if logging fails
+        pass
+
 def log_debug(message):
-    """Log debug message if DEBUG is enabled."""
+    """Log debug message (stderr when DEBUG, and optionally to file)."""
+    text = f"[DEBUG] {message}"
     if DEBUG:
-        print(f"[DEBUG] {message}", file=sys.stderr)
+        print(text, file=sys.stderr)
+    _write_log_line("DEBUG", message)
 
 def log_error(message, exc_info=None):
     """Log error message with optional exception info."""
-    print(f"[ERROR] {message}", file=sys.stderr)
+    text = f"[ERROR] {message}"
+    print(text, file=sys.stderr)
+    _write_log_line("ERROR", message)
     if exc_info:
         traceback.print_exception(*exc_info, file=sys.stderr)
 
@@ -882,7 +919,7 @@ def save_sam_params(params):
         log_debug(f"Error saving SAM parameters: {e}")
 
 
-def remove_background_sam(image_path, output_path=None, model_type='vit_h', checkpoint_path=None, device='cpu', llm_censor=None, max_iterations=3, save_successful_params=False):
+def remove_background_sam(image_path, output_path=None, model_type='vit_h', checkpoint_path=None, device='cpu', llm_censor=None, max_iterations=3, save_successful_params=False, llm_debug=False):
     """
     Remove background using SAM (Segment Anything Model) with optional LLM censor.
     
@@ -895,9 +932,10 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
         llm_censor: LLM censor instance for quality control (None = disabled)
         max_iterations: Maximum number of iterations for parameter tuning (default: 3)
         save_successful_params: Whether to save successful parameters for next time (default: False)
+        llm_debug: Debug mode - keep all intermediate results numbered and return debug info (default: False)
     
     Returns:
-        PIL.Image: Image with background removed
+        PIL.Image: Image with background removed, or dict with debug info if llm_debug=True
     """
     log_debug(f"Starting SAM processing: {image_path} (device: {device}, llm_censor: {llm_censor is not None})")
     
@@ -960,11 +998,13 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
     
     # Initial SAM generator parameters
     # Try to load saved successful parameters first
+    # Use saved params if: (save_successful_params enabled OR debug mode disabled) AND saved params exist
     saved_params = None
-    if save_successful_params and llm_censor and llm_censor.enabled:
+    if (save_successful_params or not llm_debug):
         saved_params = load_saved_sam_params()
         if saved_params:
-            log_debug(f"Using saved successful parameters as starting point: {saved_params}")
+            log_debug(f"Using saved winning parameters as starting point: {saved_params}")
+            print(f"[SAM] Using saved winning parameters from previous debug session", file=sys.stderr)
     
     # Use saved parameters if available, otherwise use defaults
     default_params = {
@@ -988,6 +1028,7 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
     best_score = 0
     all_results = []  # List of (result, score, path, iteration) tuples
     result = None  # Last result from iteration
+    debug_results_list = []  # For debug mode: list of dicts with full info
     
     try:
         log_debug(f"Loading image: {image_path}")
@@ -1027,6 +1068,8 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
         
         for iteration in range(max_iterations):
             log_debug(f"Iteration {iteration + 1}/{max_iterations} with parameters: {sam_params}")
+            current_iteration_params = sam_params.copy()  # Track parameters for this iteration
+            current_iteration_params = sam_params.copy()  # Track parameters for this iteration
             
             # Clear generator cache if parameters changed
             if iteration > 0:
@@ -1133,6 +1176,27 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
                         'is_inverted': False
                     })
                     
+                    # In debug mode, add all candidates to debug_results_list for voting
+                    if llm_debug:
+                        result_num = len(debug_results_list) + 1
+                        debug_results_list.append({
+                            'index': len(debug_results_list),
+                            'number': result_num,
+                            'path': temp_candidate_path,
+                            'score': candidate_mask.get('predicted_iou', 0) * 10,  # Convert iou (0-1) to score (0-10)
+                            'iteration': iteration,
+                            'params': current_iteration_params.copy(),
+                            'approved': False,
+                            'wrong_selection': False,
+                            'is_inverted': False,
+                            'is_candidate': True,
+                            'candidate_index': idx,
+                            'area': candidate_mask['area'],
+                            'predicted_iou': candidate_mask.get('predicted_iou', 0),
+                            'stability_score': candidate_mask.get('stability_score', 0)
+                        })
+                        log_debug(f"Added candidate #{idx} (normal) to debug results list as option #{result_num}")
+                    
                     # Also add inverted mask as candidate (in case object is smaller than background)
                     # Ensure mask is boolean before inverting
                     if mask.dtype != bool:
@@ -1155,6 +1219,27 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
                         'stability_score': candidate_mask.get('stability_score', 0),
                         'is_inverted': True
                     })
+                    
+                    # In debug mode, add inverted candidate to debug_results_list for voting
+                    if llm_debug:
+                        result_num = len(debug_results_list) + 1
+                        debug_results_list.append({
+                            'index': len(debug_results_list),
+                            'number': result_num,
+                            'path': temp_candidate_path_inv,
+                            'score': candidate_mask.get('predicted_iou', 0) * 10,  # Convert iou (0-1) to score (0-10)
+                            'iteration': iteration,
+                            'params': current_iteration_params.copy(),
+                            'approved': False,
+                            'wrong_selection': False,
+                            'is_inverted': True,
+                            'is_candidate': True,
+                            'candidate_index': idx,
+                            'area': image_rgb.shape[0] * image_rgb.shape[1] - candidate_mask['area'],
+                            'predicted_iou': candidate_mask.get('predicted_iou', 0),
+                            'stability_score': candidate_mask.get('stability_score', 0)
+                        })
+                        log_debug(f"Added candidate #{idx} (inverted) to debug results list as option #{result_num}")
                 
                 # Let LLM choose the best mask
                 # Note: Timeout is handled inside llm_censor (requests timeout=300)
@@ -1197,12 +1282,14 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
                     temp_output = candidate_results[0]['result_path']
                 
                 # Clean up other candidate files (but keep the selected one)
-                for idx, candidate_result in enumerate(candidate_results):
-                    if idx != best_idx:
-                        try:
-                            os.remove(candidate_result['result_path'])
-                        except:
-                            pass
+                # In debug mode, keep all candidate files
+                if not llm_debug:
+                    for idx, candidate_result in enumerate(candidate_results):
+                        if idx != best_idx:
+                            try:
+                                os.remove(candidate_result['result_path'])
+                            except:
+                                pass
                 
                 # Save to standard temp name for evaluation
                 # IMPORTANT: Save best result before any cleanup
@@ -1211,7 +1298,8 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
                     # Save result to final temp location
                     result.save(final_temp, "PNG")
                     # Only remove old temp if it's different from the selected candidate
-                    if temp_output != selected_result['result_path']:
+                    # In debug mode, keep all temp files
+                    if not llm_debug and temp_output != selected_result['result_path']:
                         try:
                             os.remove(temp_output)
                         except:
@@ -1228,6 +1316,72 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
                 
                 log_debug("Creating RGBA image...")
                 image_pil = Image.fromarray(image_rgb).convert("RGBA")
+                
+                # In debug mode, add all candidates to debug_results_list for voting
+                if llm_debug:
+                    for idx, candidate_mask in enumerate(candidate_masks):
+                        mask_cand = candidate_mask['segmentation']
+                        
+                        # Normal mask
+                        mask_array_cand = (mask_cand * 255).astype(np.uint8)
+                        image_array_cand = np.array(image_pil.copy())
+                        image_array_cand[:, :, 3] = mask_array_cand
+                        result_img_cand = Image.fromarray(image_array_cand, 'RGBA')
+                        temp_candidate_path = f"{output_path}.candidate_{iteration}_{idx}.png"
+                        result_img_cand.save(temp_candidate_path, "PNG")
+                        
+                        result_num = len(debug_results_list) + 1
+                        debug_results_list.append({
+                            'index': len(debug_results_list),
+                            'number': result_num,
+                            'path': temp_candidate_path,
+                            'score': candidate_mask.get('predicted_iou', 0) * 10,
+                            'iteration': iteration,
+                            'params': current_iteration_params.copy(),
+                            'approved': False,
+                            'wrong_selection': False,
+                            'is_inverted': False,
+                            'is_candidate': True,
+                            'candidate_index': idx,
+                            'area': candidate_mask['area'],
+                            'predicted_iou': candidate_mask.get('predicted_iou', 0),
+                            'stability_score': candidate_mask.get('stability_score', 0)
+                        })
+                        
+                        # Inverted mask
+                        if mask_cand.dtype != bool:
+                            mask_bool_cand = mask_cand.astype(bool)
+                        else:
+                            mask_bool_cand = mask_cand
+                        inverted_mask_cand = ~mask_bool_cand
+                        mask_array_inv_cand = (inverted_mask_cand.astype(np.uint8) * 255).astype(np.uint8)
+                        image_array_inv_cand = np.array(image_pil.copy())
+                        image_array_inv_cand[:, :, 3] = mask_array_inv_cand
+                        result_img_inv_cand = Image.fromarray(image_array_inv_cand, 'RGBA')
+                        temp_candidate_path_inv = f"{output_path}.candidate_{iteration}_{idx}_inv.png"
+                        result_img_inv_cand.save(temp_candidate_path_inv, "PNG")
+                        
+                        result_num = len(debug_results_list) + 1
+                        debug_results_list.append({
+                            'index': len(debug_results_list),
+                            'number': result_num,
+                            'path': temp_candidate_path_inv,
+                            'score': candidate_mask.get('predicted_iou', 0) * 10,
+                            'iteration': iteration,
+                            'params': current_iteration_params.copy(),
+                            'approved': False,
+                            'wrong_selection': False,
+                            'is_inverted': True,
+                            'is_candidate': True,
+                            'candidate_index': idx,
+                            'area': image_rgb.shape[0] * image_rgb.shape[1] - candidate_mask['area'],
+                            'predicted_iou': candidate_mask.get('predicted_iou', 0),
+                            'stability_score': candidate_mask.get('stability_score', 0)
+                        })
+                    
+                    log_debug(f"Added {len(candidate_masks) * 2} candidates to debug results list (no LLM mode)")
+                
+                # Create result from selected mask
                 mask_array = (mask * 255).astype(np.uint8)
                 
                 # Apply mask to alpha channel
@@ -1262,8 +1416,13 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
                     
                     log_debug(f"LLM evaluation: approved={approved}, score={quality_score}, wrong_selection={wrong_selection}, issues={evaluation.get('issues', [])}")
                     
+                    # Track if we've already saved results in debug mode (to avoid duplicates)
+                    results_saved_in_debug = False
+                    
+                    # In debug mode, always try inverted mask to give user more voting options
+                    # (even if wrong_selection=False, inverted might still be better or different)
                     # If wrong selection detected (background kept instead of object), try inverting the mask
-                    if wrong_selection:
+                    if wrong_selection or llm_debug:
                         log_debug("LLM detected wrong selection (background kept instead of object), trying inverted mask...")
                         
                         # Try inverted mask
@@ -1292,33 +1451,94 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
                             
                             log_debug(f"Inverted mask evaluation: approved={approved_inv}, wrong_selection={wrong_selection_inv}, score={quality_score_inv}")
                             
-                            # If inverted mask is better, use it
-                            if not wrong_selection_inv and quality_score_inv > quality_score:
-                                log_debug("Inverted mask is better, using it")
-                                result = result_inv
-                                temp_output = temp_output_inv
-                                approved = approved_inv
-                                quality_score = quality_score_inv
-                                wrong_selection = False
+                            # In debug mode, always save both original and inverted as separate options
+                            if llm_debug:
+                                # Save original result first (before potential replacement)
+                                result_num_orig = len(debug_results_list) + 1
+                                result_path_debug_orig = f"{output_path}.debug_{result_num_orig:03d}.png"
+                                result.save(result_path_debug_orig, "PNG")
+                                debug_results_list.append({
+                                    'index': len(debug_results_list),
+                                    'number': result_num_orig,
+                                    'path': result_path_debug_orig,
+                                    'score': quality_score,
+                                    'iteration': iteration,
+                                    'params': current_iteration_params.copy(),
+                                    'approved': approved,
+                                    'wrong_selection': wrong_selection,
+                                    'is_inverted': False
+                                })
+                                log_debug(f"Saved debug result #{result_num_orig} (original) with score {quality_score}")
                                 
-                                # Update best result tracking
-                                if quality_score > best_score:
-                                    best_score = quality_score
-                                    best_result = result.copy()
-                                    # Save to numbered file for comparison
-                                    result_path_with_score = f"{output_path}.score_{quality_score:.1f}_iter{iteration}_inv.png"
-                                    best_result.save(result_path_with_score, "PNG")
-                                    all_results.append((best_result.copy(), quality_score, result_path_with_score, iteration))
-                                    log_debug(f"New best result (inverted, score: {quality_score})")
+                                # Save inverted result as separate option
+                                result_num_inv = len(debug_results_list) + 1
+                                result_path_debug_inv = f"{output_path}.debug_{result_num_inv:03d}.png"
+                                result_inv.save(result_path_debug_inv, "PNG")
+                                debug_results_list.append({
+                                    'index': len(debug_results_list),
+                                    'number': result_num_inv,
+                                    'path': result_path_debug_inv,
+                                    'score': quality_score_inv,
+                                    'iteration': iteration,
+                                    'params': current_iteration_params.copy(),
+                                    'approved': approved_inv,
+                                    'wrong_selection': wrong_selection_inv,
+                                    'is_inverted': True
+                                })
+                                log_debug(f"Saved debug result #{result_num_inv} (inverted) with score {quality_score_inv}")
+                                results_saved_in_debug = True
+                                
+                                # Use the better one for continuation
+                                if not wrong_selection_inv and quality_score_inv > quality_score:
+                                    log_debug("Inverted mask is better, using it for continuation")
+                                    result = result_inv
+                                    temp_output = temp_output_inv
+                                    approved = approved_inv
+                                    quality_score = quality_score_inv
+                                    wrong_selection = False
+                                elif wrong_selection:
+                                    # Original was wrong, but inverted might be better
+                                    if not wrong_selection_inv:
+                                        log_debug("Original was wrong, using inverted for continuation")
+                                        result = result_inv
+                                        temp_output = temp_output_inv
+                                        approved = approved_inv
+                                        quality_score = quality_score_inv
+                                        wrong_selection = False
+                                    else:
+                                        log_debug("Both original and inverted masks rejected")
+                                        approved = False
+                                        quality_score = 0
                             else:
-                                # Inverted mask is also wrong, reject both
-                                log_debug("Inverted mask is also wrong, rejecting")
-                                try:
-                                    os.remove(temp_output_inv)
-                                except:
-                                    pass
-                                approved = False
-                                quality_score = 0
+                                # Normal mode: use better one
+                                if not wrong_selection_inv and quality_score_inv > quality_score:
+                                    log_debug("Inverted mask is better, using it")
+                                    result = result_inv
+                                    temp_output = temp_output_inv
+                                    approved = approved_inv
+                                    quality_score = quality_score_inv
+                                    wrong_selection = False
+                                    
+                                    # Update best result tracking
+                                    if quality_score > best_score:
+                                        best_score = quality_score
+                                        best_result = result.copy()
+                                        # Save to numbered file for comparison
+                                        result_path_with_score = f"{output_path}.score_{quality_score:.1f}_iter{iteration}_inv.png"
+                                        best_result.save(result_path_with_score, "PNG")
+                                        all_results.append((best_result.copy(), quality_score, result_path_with_score, iteration))
+                                        log_debug(f"New best result (inverted, score: {quality_score})")
+                                else:
+                                    # Inverted mask is also wrong, reject both
+                                    log_debug("Inverted mask is also wrong, rejecting")
+                                    # In debug mode, keep all files
+                                    if not llm_debug:
+                                        try:
+                                            os.remove(temp_output_inv)
+                                        except:
+                                            pass
+                                    approved = False
+                                    quality_score = 0
                         except Exception as e:
                             log_debug(f"Error evaluating inverted mask: {e}")
                             approved = False
@@ -1329,12 +1549,32 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
                     
                     # Save all results (not just "best") for final comparison
                     # IMPORTANT: Don't overwrite output_path until we know which is truly best
-                    if not wrong_selection:
-                        # Save this result to a numbered file for comparison
-                        result_path_with_score = f"{output_path}.score_{quality_score:.1f}_iter{iteration}.png"
-                        result.save(result_path_with_score, "PNG")
-                        all_results.append((result.copy(), quality_score, result_path_with_score, iteration))
-                        log_debug(f"Saved result with score {quality_score} to {result_path_with_score}")
+                    # Skip if already saved in debug mode (when inverted mask was evaluated)
+                    if not wrong_selection and not results_saved_in_debug:
+                        # In debug mode, save with sequential number, otherwise with score
+                        if llm_debug:
+                            result_num = len(debug_results_list) + 1
+                            result_path_debug = f"{output_path}.debug_{result_num:03d}.png"
+                            result.save(result_path_debug, "PNG")
+                            all_results.append((result.copy(), quality_score, result_path_debug, iteration))
+                            # Store full debug info for later voting
+                            debug_results_list.append({
+                                'index': len(debug_results_list),
+                                'number': result_num,
+                                'path': result_path_debug,
+                                'score': quality_score,
+                                'iteration': iteration,
+                                'params': current_iteration_params.copy(),
+                                'approved': approved,
+                                'wrong_selection': wrong_selection,
+                                'is_inverted': False
+                            })
+                            log_debug(f"Saved debug result #{result_num} with score {quality_score} to {result_path_debug}")
+                        else:
+                            result_path_with_score = f"{output_path}.score_{quality_score:.1f}_iter{iteration}.png"
+                            result.save(result_path_with_score, "PNG")
+                            all_results.append((result.copy(), quality_score, result_path_with_score, iteration))
+                            log_debug(f"Saved result with score {quality_score} to {result_path_with_score}")
                         
                         # Update best result tracking (but don't overwrite final output yet)
                         if quality_score > best_score:
@@ -1342,13 +1582,13 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
                             best_result = result.copy()
                             log_debug(f"New best result so far (score: {quality_score})")
                     
+                    # Continue with parameter adjustment and comparison (debug mode still uses LLM suggestions)
                     # If result is approved, we can use it, but still compare with all results at the end
                     if approved and not wrong_selection:
                         log_debug(f"LLM censor approved result at iteration {iteration + 1}")
                         
-                        # Save successful parameters if enabled
-                        if save_successful_params:
-                            save_sam_params(sam_params)
+                        # Don't save parameters here - they will be saved only when user selects in voting window
+                        # This ensures parameters are saved as a preset for future use, not per-image
                         
                         # Don't return immediately - continue to compare with all results
                         # But mark this as approved for final selection
@@ -1378,26 +1618,45 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
                         
                         # Don't delete temp file if it's already saved in all_results
                         # Keep all results for final comparison
-                        saved_paths = {path for _, _, path, _ in all_results}
-                        try:
-                            if temp_output != output_path and temp_output not in saved_paths:
-                                # This temp file is not in our saved results, safe to delete
-                                if os.path.exists(temp_output):
-                                    os.remove(temp_output)
-                                    log_debug(f"Removed unused temp file: {temp_output}")
-                        except:
-                            pass
+                        # In debug mode, never delete any files
+                        if not llm_debug:
+                            saved_paths = {path for _, _, path, _ in all_results}
+                            try:
+                                if temp_output != output_path and temp_output not in saved_paths:
+                                    # This temp file is not in our saved results, safe to delete
+                                    if os.path.exists(temp_output):
+                                        os.remove(temp_output)
+                                        log_debug(f"Removed unused temp file: {temp_output}")
+                            except:
+                                pass
                         continue
                     
                 except Exception as e:
                     log_error(f"Error evaluating with LLM: {e}. Saving current result for comparison.")
                     # In case of LLM error, save result for comparison but continue
                     if result is not None:
-                        # Save to all_results for final comparison
-                        result_path_with_error = f"{output_path}.error_iter{iteration}.png"
-                        result.save(result_path_with_error, "PNG")
-                        all_results.append((result.copy(), 4.0, result_path_with_error, iteration))  # Lower score for error case
-                        log_debug(f"Saved result from error case (score: 4.0) to {result_path_with_error}")
+                        if llm_debug:
+                            # Save to debug_results_list
+                            result_num = len(debug_results_list) + 1
+                            result_path_debug = f"{output_path}.debug_{result_num:03d}.png"
+                            result.save(result_path_debug, "PNG")
+                            debug_results_list.append({
+                                'index': len(debug_results_list),
+                                'number': result_num,
+                                'path': result_path_debug,
+                                'score': 4.0,  # Lower score for error case
+                                'iteration': iteration,
+                                'params': current_iteration_params.copy(),
+                                'approved': False,
+                                'wrong_selection': False
+                            })
+                            log_debug(f"Saved debug result #{result_num} from error case to {result_path_debug}")
+                        else:
+                            # Save to all_results for final comparison
+                            result_path_with_error = f"{output_path}.error_iter{iteration}.png"
+                            result.save(result_path_with_error, "PNG")
+                            all_results.append((result.copy(), 4.0, result_path_with_error, iteration))
+                            log_debug(f"Saved result from error case (score: 4.0) to {result_path_with_error}")
                         # Don't return - continue to compare with all results at the end
                     # If result is None, we need to create it from the last mask
                     log_debug("Result is None, creating from last processed mask")
@@ -1415,16 +1674,43 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
                     else:
                         raise ValueError("No masks generated and LLM evaluation failed")
             else:
-                # LLM censor disabled - save result and return immediately after first iteration
-                # Without LLM, we don't need multiple iterations
-                log_debug(f"LLM censor disabled - using result from iteration {iteration + 1}")
-                print(f"[SAM] LLM censor disabled - using result from iteration {iteration + 1}", file=sys.stderr)
+                # LLM censor disabled - save result
+                log_debug(f"LLM censor disabled - processing iteration {iteration + 1}")
+                print(f"[SAM] LLM censor disabled - processing iteration {iteration + 1}", file=sys.stderr)
                 
-                # Save result to final output
-                result.save(output_path, "PNG")
-                log_debug(f"Saved result to {output_path}")
-                print(f"[SAM] Saved result to {os.path.basename(output_path)}", file=sys.stderr)
-                return result
+                # In debug mode, save numbered result and continue
+                if llm_debug:
+                    result_num = len(debug_results_list) + 1
+                    result_path_debug = f"{output_path}.debug_{result_num:03d}.png"
+                    result.save(result_path_debug, "PNG")
+                    debug_results_list.append({
+                        'index': len(debug_results_list),
+                        'number': result_num,
+                        'path': result_path_debug,
+                        'score': 5.0,  # Default score
+                        'iteration': iteration,
+                        'params': current_iteration_params.copy(),
+                        'approved': False,
+                        'wrong_selection': False
+                    })
+                    log_debug(f"Saved debug result #{result_num} to {result_path_debug}")
+                    # Continue to collect all iterations in debug mode
+                    if iteration < max_iterations - 1:
+                        continue
+                    else:
+                        # Last iteration - return debug results for voting
+                        return debug_results_list
+                
+                # Normal mode: save result to final output and return immediately
+                # Without LLM, we don't need multiple iterations - just use first result
+                if result is not None:
+                    result.save(output_path, "PNG")
+                    log_debug(f"Saved result to {output_path}")
+                    print(f"[SAM] Saved result to {os.path.basename(output_path)}", file=sys.stderr)
+                    return result
+                else:
+                    # Result should have been created above, but if not, raise error
+                    raise ValueError("Result is None but LLM censor is disabled")
         
         # If reached end of iterations, compare ALL results and choose the truly best one
         # IMPORTANT: Compare all saved results, not just the last "best" one
@@ -1451,8 +1737,20 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
                     except Exception as e:
                         log_debug(f"Error loading saved file {saved_file}: {e}")
         
+        # Check for debug results first
+        if llm_debug and debug_results_list:
+            # Debug mode: return debug info for voting
+            # Save first result as placeholder
+            first_result_path = debug_results_list[0]['path']
+            import shutil
+            shutil.copy2(first_result_path, output_path)
+            log_debug(f"Debug mode: {len(debug_results_list)} results saved, waiting for user vote")
+            print(f"[DEBUG] {len(debug_results_list)} results saved and numbered. Voting window will appear.", file=sys.stderr)
+            return debug_results_list  # Return debug info instead of image
+        
         if all_results:
-            # Sort all results by score (highest first)
+            
+            # Normal mode: sort and select best
             all_results.sort(key=lambda x: x[1], reverse=True)
             best_final_result, best_final_score, best_final_path, best_final_iter = all_results[0]
             
@@ -1470,11 +1768,11 @@ def remove_background_sam(image_path, output_path=None, model_type='vit_h', chec
             log_debug(f"Other results available for comparison: {len(all_results)-1} files")
             
             # Print summary to console for user
-            print(f"\n[INFO] Processed {len(all_results)} result(s). Best score: {best_final_score:.1f}")
+            print(f"\n[INFO] Processed {len(all_results)} result(s). Best score: {best_final_score:.1f}", file=sys.stderr)
             if len(all_results) > 1:
-                print(f"[INFO] All results saved with scores in filename. You can compare them manually.")
-                print(f"[INFO] Best result saved to: {os.path.basename(output_path)}")
-                print(f"[INFO] Other results: {', '.join([os.path.basename(path) for _, _, path, _ in all_results[1:5]])}")
+                print(f"[INFO] All results saved with scores in filename. You can compare them manually.", file=sys.stderr)
+                print(f"[INFO] Best result saved to: {os.path.basename(output_path)}", file=sys.stderr)
+                print(f"[INFO] Other results: {', '.join([os.path.basename(path) for _, _, path, _ in all_results[1:5]])}", file=sys.stderr)
             
             return best_final_result
         elif best_result is not None:
@@ -1577,7 +1875,7 @@ def normalize_method_name(method):
     return legacy_map.get(method, method)
 
 
-def remove_background(image_path, output_path=None, method='rembg_cpu', llm_censor=None, llm_max_iterations=3, save_successful_params=False):
+def remove_background(image_path, output_path=None, method='rembg_cpu', llm_censor=None, llm_max_iterations=3, save_successful_params=False, llm_debug=False):
     """
     Unified function to remove background using specified method.
     
@@ -1588,12 +1886,13 @@ def remove_background(image_path, output_path=None, method='rembg_cpu', llm_cens
         llm_censor: LLM censor instance (only used for SAM methods)
         llm_max_iterations: Maximum iterations for LLM parameter tuning (default: 3)
         save_successful_params: Whether to save successful parameters for next time (default: False)
+        llm_debug: Debug mode - keep all intermediate results and return debug info (default: False)
     
     Returns:
-        PIL.Image: Image with background removed, or None on error
+        PIL.Image: Image with background removed, or dict with debug info if llm_debug=True, or None on error
     """
     method = normalize_method_name(method)
-    log_debug(f"remove_background called with method: {method}, image: {image_path}, llm_censor: {llm_censor is not None}")
+    log_debug(f"remove_background called with method: {method}, image: {image_path}, llm_censor: {llm_censor is not None}, debug: {llm_debug}")
     
     try:
         if method == 'rembg_cpu':
@@ -1601,9 +1900,9 @@ def remove_background(image_path, output_path=None, method='rembg_cpu', llm_cens
         elif method == 'rembg_gpu':
             return remove_background_rembg_gpu(image_path, output_path)
         elif method == 'sam_cpu':
-            return remove_background_sam(image_path, output_path, device='cpu', llm_censor=llm_censor, max_iterations=llm_max_iterations, save_successful_params=save_successful_params)
+            return remove_background_sam(image_path, output_path, device='cpu', llm_censor=llm_censor, max_iterations=llm_max_iterations, save_successful_params=save_successful_params, llm_debug=llm_debug)
         elif method == 'sam_gpu':
-            return remove_background_sam(image_path, output_path, device='cuda', llm_censor=llm_censor, max_iterations=llm_max_iterations, save_successful_params=save_successful_params)
+            return remove_background_sam(image_path, output_path, device='cuda', llm_censor=llm_censor, max_iterations=llm_max_iterations, save_successful_params=save_successful_params, llm_debug=llm_debug)
         else:
             error_msg = f"Unknown method: {method}. Choose from: rembg_cpu, rembg_gpu, sam_cpu, sam_gpu"
             log_error(error_msg)

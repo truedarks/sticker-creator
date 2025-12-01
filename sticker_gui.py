@@ -139,6 +139,17 @@ class StickerGUI:
         self.root.geometry("800x500")
         self.root.resizable(False, False)
         
+        # --- Application settings ---
+        # Load app-wide settings (independent from LLM censor settings)
+        app_settings = self.load_app_settings()
+        self.save_logs_to_file = tk.BooleanVar(value=app_settings.get('save_logs', False))
+        
+        # --- Menu bar ---
+        menubar = tk.Menu(self.root)
+        # Simple top-level Settings menu item that opens app settings window
+        menubar.add_command(label="Settings", command=self.open_app_settings)
+        self.root.config(menu=menubar)
+        
         # Configure style
         style = ttk.Style()
         style.theme_use('clam')
@@ -237,6 +248,7 @@ class StickerGUI:
         self.llm_censor_url = tk.StringVar(value=saved_settings.get('url', 'http://localhost:11434'))
         self.llm_censor_iterations = tk.IntVar(value=saved_settings.get('iterations', 3))
         self.llm_censor_save_successful = tk.BooleanVar(value=saved_settings.get('save_successful', False))
+        self.llm_censor_debug = tk.BooleanVar(value=saved_settings.get('debug', False))
         
         # Update info when method changes
         self.method_var.trace('w', self.on_method_change)
@@ -300,6 +312,85 @@ class StickerGUI:
         self.left_drop_label = left_drop_label
         self.right_drop_label = right_drop_label
     
+    def get_app_config_path(self):
+        """Get path to general application config file."""
+        config_dir = PROJECT_ROOT / ".config"
+        config_dir.mkdir(exist_ok=True)
+        return config_dir / "app_config.json"
+    
+    def load_app_settings(self):
+        """Load general application settings from file."""
+        config_path = self.get_app_config_path()
+        if not config_path.exists():
+            return {}
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading app settings: {e}", file=sys.stderr)
+            return {}
+    
+    def save_app_settings(self):
+        """Save general application settings to file."""
+        config_path = self.get_app_config_path()
+        try:
+            settings = {
+                "save_logs": self.save_logs_to_file.get(),
+            }
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=2)
+        except Exception as e:
+            print(f"Error saving app settings: {e}", file=sys.stderr)
+    
+    def open_app_settings(self):
+        """Open main application settings window."""
+        settings_window = tk.Toplevel(self.root)
+        settings_window.title("Settings")
+        settings_window.transient(self.root)
+        settings_window.grab_set()
+        settings_window.resizable(False, False)
+        
+        main_frame = ttk.Frame(settings_window, padding="15")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        title_label = ttk.Label(
+            main_frame,
+            text="Application Settings",
+            font=("Arial", 12, "bold")
+        )
+        title_label.pack(pady=(0, 10))
+        
+        # Logging settings
+        logging_frame = ttk.LabelFrame(main_frame, text="Logging", padding="8")
+        logging_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        save_logs_check = ttk.Checkbutton(
+            logging_frame,
+            text="Save logs to text file",
+            variable=self.save_logs_to_file
+        )
+        save_logs_check.pack(anchor=tk.W)
+        
+        ttk.Label(
+            logging_frame,
+            text="When enabled, detailed logs from background removal engine\n"
+                 "will be saved to a text file for debugging.",
+            font=("Arial", 8),
+            foreground="gray",
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(2, 0))
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        def save_and_close():
+            self.save_app_settings()
+            settings_window.destroy()
+        
+        ttk.Button(button_frame, text="OK", command=save_and_close).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(button_frame, text="Cancel", command=settings_window.destroy).pack(side=tk.RIGHT)
+
     def get_llm_censor_config_path(self):
         """Get path to LLM censor config file."""
         config_dir = PROJECT_ROOT / ".config"
@@ -328,7 +419,8 @@ class StickerGUI:
                 'model': self.llm_censor_model.get(),
                 'url': self.llm_censor_url.get(),
                 'iterations': self.llm_censor_iterations.get(),
-                'save_successful': self.llm_censor_save_successful.get()
+                'save_successful': self.llm_censor_save_successful.get(),
+                'debug': self.llm_censor_debug.get()
             }
             with open(config_path, 'w') as f:
                 json.dump(settings, f, indent=2)
@@ -620,6 +712,21 @@ class StickerGUI:
         ttk.Label(
             iter_frame,
             text="When enabled, parameters that pass AI censor will be saved\nand used as starting point for next image",
+            font=("Arial", 8),
+            foreground="gray"
+        ).pack(anchor=tk.W, pady=(2, 0))
+        
+        # Debug mode checkbox
+        debug_check = ttk.Checkbutton(
+            iter_frame,
+            text="Debug mode (keep all intermediate results and show voting window)",
+            variable=self.llm_censor_debug
+        )
+        debug_check.pack(anchor=tk.W, pady=(8, 0))
+        
+        ttk.Label(
+            iter_frame,
+            text="When enabled, all intermediate results are kept and numbered.\nAfter processing, a voting window will appear to select the best result.\nSelected parameters will be saved for future use.",
             font=("Arial", 8),
             foreground="gray"
         ).pack(anchor=tk.W, pady=(2, 0))
@@ -1244,7 +1351,8 @@ class StickerGUI:
                             script_path = os.path.abspath(__file__)
                             subprocess.Popen([sys.executable, script_path], cwd=os.getcwd())
                         
-                        install_window.after(3000, restart_app)  # Увеличено до 3 секунд чтобы прочитать
+                        # Give user a few seconds to read the message before restart
+                        install_window.after(3000, restart_app)
                 else:
                     error_msg = "\n".join(errors[:5])  # Show first 5 errors
                     if len(errors) > 5:
@@ -1326,6 +1434,9 @@ class StickerGUI:
                     # Add save successful params if enabled
                     if self.llm_censor_save_successful.get():
                         args.append("--save-successful-params")
+                    # Add debug mode if enabled
+                    if self.llm_censor_debug.get():
+                        args.append("--llm-debug")
                 else:
                     # Only use parallel if LLM censor is not enabled
                     args.insert(2, "--parallel")
@@ -1347,19 +1458,78 @@ class StickerGUI:
             
             # Check if any output files were created (even if process failed)
             output_files_found = []
+            debug_voting_files = []  # List of (input_path, output_path, debug_json_path) tuples
             if mode == "remove_bg":
                 for file_path in files:
                     input_path = Path(file_path)
                     output_path = input_path.parent / f"{input_path.stem}_nobg{input_path.suffix}"
                     if output_path.exists():
                         output_files_found.append(str(output_path))
+                    
+                    # Check for debug results JSON file
+                    debug_json_path = input_path.parent / f"{input_path.stem}_nobg{input_path.suffix}.debug_results.json"
+                    if debug_json_path.exists():
+                        debug_voting_files.append((str(input_path), str(output_path), str(debug_json_path)))
+            
+            # Handle debug voting windows if any
+            if debug_voting_files:
+                # Show voting windows for each file with debug results
+                def show_voting_windows():
+                    for input_path, output_path, debug_json_path in debug_voting_files:
+                        try:
+                            # Load debug results from JSON
+                            with open(debug_json_path, 'r', encoding='utf-8') as f:
+                                debug_data = json.load(f)
+                            
+                            debug_results = debug_data.get('results', [])
+                            if debug_results:
+                                # Show voting window in main GUI thread
+                                selected_idx = show_debug_voting_window(
+                                    debug_data.get('original_path', input_path),
+                                    debug_results,
+                                    self.root
+                                )
+                                
+                                # Update final output based on selection
+                                if selected_idx is not None and 0 <= selected_idx < len(debug_results):
+                                    selected_result = debug_results[selected_idx]
+                                    # Copy selected result to final output
+                                    import shutil
+                                    shutil.copy2(selected_result['path'], output_path)
+                                    print(f"[DEBUG] Selected result #{selected_result['number']} based on user vote")
+                                    
+                                    # Save winning parameters
+                                    params = selected_result.get('params', {})
+                                    if params:
+                                        from bg_removal import save_sam_params
+                                        save_sam_params(params)
+                                        print(f"[DEBUG] Saved winning parameters: {params}")
+                                
+                                # Clean up JSON file
+                                try:
+                                    os.remove(debug_json_path)
+                                except:
+                                    pass
+                        except Exception as e:
+                            import traceback
+                            print(f"[WARNING] Error showing voting window for {input_path}: {e}", file=sys.stderr)
+                            traceback.print_exc(file=sys.stderr)
+                
+                # Schedule voting windows to show after a short delay
+                self.root.after(500, show_voting_windows)
             
             # Update status
             if process.returncode == 0:
-                status_label.after(0, lambda: status_label.configure(
-                    text="[OK] Completed successfully!",
-                    foreground="green"
-                ))
+                if debug_voting_files:
+                    status_label.after(0, lambda: status_label.configure(
+                        text=f"[OK] Processing complete! Please select best results...",
+                        foreground="green"
+                    ))
+                else:
+                    status_label.after(0, lambda: status_label.configure(
+                        text="[OK] Completed successfully!",
+                        foreground="green"
+                    ))
             else:
                 # Build error message
                 error_code = process.returncode
@@ -1367,21 +1537,21 @@ class StickerGUI:
                 
                 # Decode Windows error codes
                 if error_code == 3221226505:  # 0xC0000005 STATUS_ACCESS_VIOLATION
-                    error_msg += "\nКритическая ошибка доступа к памяти"
-                    error_msg += "\nВозможные причины:"
-                    error_msg += "\n• Проблемы с CUDA/GPU драйверами"
-                    error_msg += "\n• Конфликт библиотек (onnxruntime, torch)"
-                    error_msg += "\n• Недостаточно памяти"
+                    error_msg += "\nCritical memory access violation"
+                    error_msg += "\nPossible causes:"
+                    error_msg += "\n• CUDA/GPU driver issues"
+                    error_msg += "\n• Library conflicts (onnxruntime, torch)"
+                    error_msg += "\n• Insufficient memory"
                     if method in ('rembg_gpu', 'sam_gpu'):
-                        error_msg += "\n\nПопробуйте:"
-                        error_msg += "\n• Использовать CPU метод (rembg_cpu)"
-                        error_msg += "\n• Обновить драйверы NVIDIA"
-                        error_msg += "\n• Перезапустить приложение"
+                        error_msg += "\n\nTry:"
+                        error_msg += "\n• Use CPU method instead (rembg_cpu)"
+                        error_msg += "\n• Update NVIDIA drivers"
+                        error_msg += "\n• Restart the application"
                 
                 # Check if any files were saved despite error
                 if output_files_found:
-                    error_msg += f"\n\n✓ Сохранено файлов: {len(output_files_found)}"
-                    error_msg += "\n(Часть обработки завершилась успешно)"
+                    error_msg += f"\n\n✓ Saved files: {len(output_files_found)}"
+                    error_msg += "\n(Some images were processed successfully)"
                 
                 # Add stderr details if available
                 if stderr:
@@ -1389,7 +1559,7 @@ class StickerGUI:
                     # Get last few error lines
                     last_errors = [line for line in stderr_lines if line.strip()][-3:]
                     if last_errors:
-                        error_msg += "\n\nДетали ошибки:"
+                        error_msg += "\n\nError details:"
                         for line in last_errors:
                             if len(line) > 100:
                                 line = line[:100] + "..."
@@ -1409,7 +1579,7 @@ class StickerGUI:
                 # Also show full error in messagebox for critical errors
                 if error_code == 3221226505:
                     self.root.after(100, lambda: messagebox.showerror(
-                        "Критическая ошибка",
+                        "Critical error",
                         error_msg
                     ))
             
@@ -1426,6 +1596,199 @@ class StickerGUI:
                 foreground="red"
             ))
             print(f"Exception: {e}", file=sys.stderr)
+
+
+def show_debug_voting_window(original_path, debug_results, parent_window=None):
+    """
+    Show voting window for debug mode to select best result.
+    
+    Args:
+        original_path: Path to original image
+        debug_results: List of dicts with debug info (path, score, params, etc.)
+        parent_window: Parent tkinter window (optional)
+    
+    Returns:
+        int: Index of selected result, or None if cancelled
+    """
+    if not debug_results:
+        return None
+    
+    from PIL import Image, ImageTk
+    import tkinter as tk
+    from tkinter import ttk
+    
+    # Create voting window
+    vote_window = tk.Toplevel(parent_window) if parent_window else tk.Tk()
+    vote_window.title("Select Best Result - Debug Mode")
+    vote_window.transient(parent_window) if parent_window else None
+    vote_window.grab_set()
+    
+    # Main frame
+    main_frame = ttk.Frame(vote_window, padding="15")
+    main_frame.pack(fill=tk.BOTH, expand=True)
+    
+    # Title
+    title_label = ttk.Label(
+        main_frame,
+        text=f"Select the best result from {len(debug_results)} options",
+        font=("Arial", 12, "bold")
+    )
+    title_label.pack(pady=(0, 10))
+    
+    # Description
+    desc_label = ttk.Label(
+        main_frame,
+        text="Click on the image you think is the best result.\nSelected parameters will be saved for future use.",
+        font=("Arial", 9),
+        foreground="gray",
+        justify=tk.CENTER
+    )
+    desc_label.pack(pady=(0, 15))
+    
+    # Results frame with scrollbar
+    canvas_frame = ttk.Frame(main_frame)
+    canvas_frame.pack(fill=tk.BOTH, expand=True)
+    
+    canvas = tk.Canvas(canvas_frame, bg="white")
+    scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
+    scrollable_frame = ttk.Frame(canvas)
+    
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+    
+    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    
+    selected_index = [None]  # Use list to allow modification in nested function
+    
+    # Load and display all results
+    result_images = []
+    result_labels = []
+    
+    def on_result_click(idx):
+        """Handle click on result image."""
+        # Reset all borders
+        for label in result_labels:
+            label.configure(relief="raised", borderwidth=2)
+        
+        # Highlight selected
+        result_labels[idx].configure(relief="solid", borderwidth=4)
+        selected_index[0] = idx
+        
+        # Update info
+        result_info = debug_results[idx]
+        info_text = f"Selected: Result #{result_info['number']}\n"
+        info_text += f"Score: {result_info['score']:.1f}\n"
+        info_text += f"Iteration: {result_info['iteration'] + 1}\n"
+        if result_info.get('is_candidate', False):
+            info_text += f"Type: Candidate #{result_info.get('candidate_index', 0)}\n"
+            info_text += f"IOU: {result_info.get('predicted_iou', 0):.2f}\n"
+        info_text += f"Inverted: {'Yes' if result_info.get('is_inverted', False) else 'No'}\n"
+        info_text += f"Approved: {'Yes' if result_info.get('approved', False) else 'No'}"
+        info_label.configure(text=info_text)
+    
+    # Load images and create buttons
+    max_width = 200
+    max_height = 200
+    
+    for idx, result_info in enumerate(debug_results):
+        result_frame = ttk.Frame(scrollable_frame)
+        result_frame.grid(row=idx // 3, column=idx % 3, padx=10, pady=10, sticky="nsew")
+        
+        # Load and resize image
+        try:
+            img = Image.open(result_info['path'])
+            img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+            
+            # Create clickable label
+            label = ttk.Label(
+                result_frame,
+                image=photo,
+                text=f"#{result_info['number']}",
+                compound=tk.TOP,
+                relief="raised",
+                borderwidth=2,
+                cursor="hand2"
+            )
+            label.image = photo  # Keep a reference
+            label.pack()
+            label.bind("<Button-1>", lambda e, i=idx: on_result_click(i))
+            
+            result_images.append(photo)
+            result_labels.append(label)
+            
+            # Score label with additional info
+            score_text = f"Score: {result_info['score']:.1f}"
+            if result_info.get('is_candidate', False):
+                score_text += f" | IOU: {result_info.get('predicted_iou', 0):.2f}"
+            if result_info.get('is_inverted', False):
+                score_text += " (inv)"
+            score_label = ttk.Label(
+                result_frame,
+                text=score_text,
+                font=("Arial", 8)
+            )
+            score_label.pack()
+            
+        except Exception as e:
+            error_label = ttk.Label(
+                result_frame,
+                text=f"Error loading #{result_info['number']}:\n{str(e)[:30]}",
+                foreground="red"
+            )
+            error_label.pack()
+    
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+    
+    # Info label
+    info_label = ttk.Label(
+        main_frame,
+        text="Click on an image to select",
+        font=("Arial", 9),
+        foreground="blue"
+    )
+    info_label.pack(pady=(10, 0))
+    
+    # Buttons
+    button_frame = ttk.Frame(main_frame)
+    button_frame.pack(fill=tk.X, pady=(15, 0))
+    
+    def on_ok():
+        if selected_index[0] is not None:
+            # Save selected parameters to winning parameters list
+            selected_result = debug_results[selected_index[0]]
+            params = selected_result.get('params', {})
+            
+            if params:
+                from bg_removal import save_sam_params
+                save_sam_params(params)
+                print(f"[DEBUG] Saved winning parameters from result #{selected_result['number']}: {params}", file=sys.stderr)
+            
+            vote_window.result_index = selected_index[0]
+            vote_window.destroy()
+        else:
+            from tkinter import messagebox
+            messagebox.showwarning("No Selection", "Please select a result before clicking OK.")
+    
+    def on_cancel():
+        vote_window.result_index = None
+        vote_window.destroy()
+    
+    ttk.Button(button_frame, text="OK", command=on_ok).pack(side=tk.RIGHT, padx=(5, 0))
+    ttk.Button(button_frame, text="Cancel", command=on_cancel).pack(side=tk.RIGHT)
+    
+    # Configure grid weights for responsive layout
+    for i in range(3):
+        scrollable_frame.columnconfigure(i, weight=1)
+    
+    # Wait for window to close
+    vote_window.wait_window()
+    
+    return getattr(vote_window, 'result_index', None)
 
 
 def main():

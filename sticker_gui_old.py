@@ -1224,7 +1224,8 @@ class StickerGUI:
                             script_path = os.path.abspath(__file__)
                             subprocess.Popen([sys.executable, script_path], cwd=os.getcwd())
                         
-                        install_window.after(3000, restart_app)  # Увеличено до 3 секунд чтобы прочитать
+                        # Give user a few seconds to read the message before restart
+                        install_window.after(3000, restart_app)
                 else:
                     error_msg = "\n".join(errors[:5])  # Show first 5 errors
                     if len(errors) > 5:

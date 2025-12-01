@@ -16,6 +16,7 @@ PROJECT_ROOT = Path(__file__).parent.absolute()
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing
+import json
 
 # Import unified background removal
 try:
@@ -41,7 +42,7 @@ except ImportError:
     LLM_CENSOR_AVAILABLE = False
 
 
-def remove_background_single(image_path, method='rembg_cpu', llm_censor=None, llm_max_iterations=3, save_successful_params=False):
+def remove_background_single(image_path, method='rembg_cpu', llm_censor=None, llm_max_iterations=3, save_successful_params=False, llm_debug=False):
     """
     Removes background from a single image.
     
@@ -51,9 +52,10 @@ def remove_background_single(image_path, method='rembg_cpu', llm_censor=None, ll
         llm_censor: LLM censor instance (only used for SAM methods)
         llm_max_iterations: Maximum iterations for LLM parameter tuning
         save_successful_params: Whether to save successful parameters for next time
+        llm_debug: Debug mode - keep all intermediate results and show voting window
     
     Returns:
-        tuple: (success: bool, input_path: str, output_path: str, error: str or None)
+        tuple: (success: bool, input_path: str, output_path: str, error: str or None, debug_results: list or None)
     """
     input_path = Path(image_path)
     output_path = None
@@ -67,8 +69,16 @@ def remove_background_single(image_path, method='rembg_cpu', llm_censor=None, ll
         
         # Use unified background removal
         if BG_REMOVAL_AVAILABLE:
-            remove_background(str(input_path), str(output_path), method=method, 
-                            llm_censor=llm_censor, llm_max_iterations=llm_max_iterations, save_successful_params=save_successful_params)
+            result = remove_background(str(input_path), str(output_path), method=method, 
+                            llm_censor=llm_censor, llm_max_iterations=llm_max_iterations, save_successful_params=save_successful_params, llm_debug=llm_debug)
+            
+            # Check if result is debug_results (list) or image
+            if result is not None and llm_debug and isinstance(result, list):
+                # Debug mode returned list of results
+                return (True, str(input_path), str(output_path), None, result)
+            
+            # For rembg methods or SAM without debug, result is PIL.Image or None
+            # The file should already be saved by remove_background function
         else:
             # Fallback to old rembg method
             if not REMBG_AVAILABLE:
@@ -82,9 +92,9 @@ def remove_background_single(image_path, method='rembg_cpu', llm_censor=None, ll
         
         # Verify output file was created
         if output_path and output_path.exists() and output_path.stat().st_size > 0:
-            return (True, str(input_path), str(output_path), None)
+            return (True, str(input_path), str(output_path), None, None)
         else:
-            return (False, str(input_path), str(output_path) if output_path else None, "Output file was not created or is empty")
+            return (False, str(input_path), str(output_path) if output_path else None, "Output file was not created or is empty", None)
         
     except KeyboardInterrupt:
         # User cancelled - don't treat as error
@@ -121,10 +131,10 @@ def remove_background_single(image_path, method='rembg_cpu', llm_censor=None, ll
             print("\nFull traceback:", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
         
-        return (False, str(image_path), str(output_path) if output_path else None, error_msg)
+        return (False, str(image_path), str(output_path) if output_path else None, error_msg, None)
 
 
-def process_sequential(image_files, method='rembg_cpu', llm_censor=None, llm_max_iterations=3, save_successful_params=False):
+def process_sequential(image_files, method='rembg_cpu', llm_censor=None, llm_max_iterations=3, save_successful_params=False, llm_debug=False):
     """
     Process images sequentially (one after another).
     
@@ -134,6 +144,7 @@ def process_sequential(image_files, method='rembg_cpu', llm_censor=None, llm_max
         llm_censor: LLM censor instance (only used for SAM methods)
         llm_max_iterations: Maximum iterations for LLM parameter tuning
         save_successful_params: Whether to save successful parameters for next time
+        llm_debug: Debug mode - keep all intermediate results and show voting window
     
     Returns:
         dict: Statistics about processing
@@ -157,9 +168,15 @@ def process_sequential(image_files, method='rembg_cpu', llm_censor=None, llm_max
         
         start_time = time.time()
         try:
-            success, input_path, output_path, error = remove_background_single(
-                image_file, method=method, llm_censor=llm_censor, llm_max_iterations=llm_max_iterations, save_successful_params=save_successful_params
+            result = remove_background_single(
+                image_file, method=method, llm_censor=llm_censor, llm_max_iterations=llm_max_iterations, save_successful_params=save_successful_params, llm_debug=llm_debug
             )
+            if len(result) == 5:
+                success, input_path, output_path, error, debug_results = result
+            else:
+                # Backward compatibility
+                success, input_path, output_path, error = result
+                debug_results = None
         except KeyboardInterrupt:
             print(f"  [INTERRUPTED] Processing cancelled by user")
             # Check if output file was created before interruption
@@ -169,6 +186,25 @@ def process_sequential(image_files, method='rembg_cpu', llm_censor=None, llm_max
                 print(f"  [INFO] Partial result saved to: {output_path_check}")
             raise
         elapsed = time.time() - start_time
+        
+        # Handle debug mode - save debug results to JSON file for GUI to pick up
+        if llm_debug and debug_results and success:
+            try:
+                # Save debug results to JSON file for GUI to process
+                debug_json_path = f"{output_path}.debug_results.json"
+                debug_data = {
+                    'original_path': str(input_path),
+                    'output_path': str(output_path),
+                    'results': debug_results
+                }
+                with open(debug_json_path, 'w', encoding='utf-8') as f:
+                    json.dump(debug_data, f, indent=2, ensure_ascii=False)
+                print(f"  [DEBUG] Saved {len(debug_results)} debug results to {os.path.basename(debug_json_path)}")
+                print(f"  [DEBUG] Voting window will appear in GUI")
+            except Exception as e:
+                import traceback
+                print(f"  [WARNING] Could not save debug results: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
         
         if success:
             success_count += 1
@@ -187,7 +223,7 @@ def process_sequential(image_files, method='rembg_cpu', llm_censor=None, llm_max
     }
 
 
-def process_parallel(image_files, max_workers=None, method='rembg_cpu', llm_censor=None, llm_max_iterations=3):
+def process_parallel(image_files, max_workers=None, method='rembg_cpu', llm_censor=None, llm_max_iterations=3, llm_debug=False):
     """
     Process images in parallel using multiple threads.
     
@@ -197,6 +233,7 @@ def process_parallel(image_files, max_workers=None, method='rembg_cpu', llm_cens
         method (str): Background removal method
         llm_censor: LLM censor instance (only used for SAM methods, note: not thread-safe for parallel processing)
         llm_max_iterations: Maximum iterations for LLM parameter tuning
+        llm_debug: Debug mode - keep all intermediate results and show voting window
     
     Returns:
         dict: Statistics about processing
@@ -209,7 +246,7 @@ def process_parallel(image_files, max_workers=None, method='rembg_cpu', llm_cens
     # - Multiple threads would just compete for GPU/CPU resources
     if method in ('sam_cpu', 'sam_gpu'):
         print(f"Note: SAM methods use a cached model, switching to sequential processing for efficiency.")
-        return process_sequential(image_files, method=method)
+        return process_sequential(image_files, method=method, llm_censor=llm_censor, llm_max_iterations=llm_max_iterations, save_successful_params=False, llm_debug=llm_debug)
     
     # Determine number of workers (all cores except one)
     if max_workers is None:
@@ -228,12 +265,12 @@ def process_parallel(image_files, max_workers=None, method='rembg_cpu', llm_cens
     # If LLM censor is enabled, we should use sequential processing
     if llm_censor and llm_censor.enabled:
         print("Note: LLM censor enabled. Switching to sequential processing for thread safety.")
-        return process_sequential(image_files, method=method, llm_censor=llm_censor, llm_max_iterations=llm_max_iterations)
+        return process_sequential(image_files, method=method, llm_censor=llm_censor, llm_max_iterations=llm_max_iterations, save_successful_params=False, llm_debug=llm_debug)
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all tasks
         future_to_file = {
-            executor.submit(remove_background_single, img, method, None, llm_max_iterations): img 
+            executor.submit(remove_background_single, img, method, None, llm_max_iterations, False, llm_debug): img 
             for img in image_files
         }
         
@@ -244,7 +281,13 @@ def process_parallel(image_files, max_workers=None, method='rembg_cpu', llm_cens
             image_file = future_to_file[future]
             
             try:
-                success, input_path, output_path, error = future.result()
+                result = future.result()
+                if len(result) == 5:
+                    success, input_path, output_path, error, debug_results = result
+                else:
+                    # Backward compatibility
+                    success, input_path, output_path, error = result
+                    debug_results = None
                 
                 if success:
                     success_count += 1
@@ -295,6 +338,8 @@ Examples:
                        help='Maximum iterations for LLM parameter tuning (default: 3)')
     parser.add_argument('--save-successful-params', action='store_true',
                        help='Save successful SAM parameters for next time (only with LLM censor)')
+    parser.add_argument('--llm-debug', action='store_true',
+                       help='Debug mode: keep all intermediate results, show voting window')
     
     args = parser.parse_args()
     
@@ -356,12 +401,13 @@ Examples:
             print("Install requests library: pip install requests")
 
     # Process images
+    llm_debug = args.llm_debug if hasattr(args, 'llm_debug') else False
     if args.parallel:
         stats = process_parallel(valid_files, max_workers=args.workers, method=args.method,
-                                llm_censor=llm_censor, llm_max_iterations=args.llm_iterations, save_successful_params=args.save_successful_params)
+                                llm_censor=llm_censor, llm_max_iterations=args.llm_iterations, save_successful_params=args.save_successful_params, llm_debug=llm_debug)
     else:
         stats = process_sequential(valid_files, method=args.method,
-                                   llm_censor=llm_censor, llm_max_iterations=args.llm_iterations, save_successful_params=args.save_successful_params)
+                                   llm_censor=llm_censor, llm_max_iterations=args.llm_iterations, save_successful_params=args.save_successful_params, llm_debug=llm_debug)
     
     # Print summary
     print("\n" + "=" * 60)
